@@ -1,0 +1,40 @@
+{
+    "model": {
+        "baseline_model": "Qwen/Qwen3-0.6B"
+    },
+    "training": {
+        "learning_rate": 1e-4,
+        "weight_decay": 0.01,
+        "num_epochs": 1,
+        "max_length": 2048,
+        "device": "cuda",
+        "scheduler_type": "linear",
+        "warmup_ratio": 0.1,
+        "max_grad_norm": 1.0,
+        "per_device_train_batch_size": 4,
+        "num_processes": 8,
+        "freeze": [],
+        "gradient_accumulation_steps": 8,
+        "seed": 42
+    },
+    "output": {
+        "output_dir": "local/checkpoints/0.6B_general_finetune",
+        "save_steps": 500,
+        "eval_steps": 100,
+        "wandb_config": {
+            "project": "Rosetta",
+            "mode": "offline",
+            "run_name": "baseline_general_finetune_OpenHermes_500k",
+            "entity": "nics-efc"
+        }
+    },
+    "data": {
+        "type": "OpenHermesChatDataset",
+        "kwargs": {
+            "split": "train",
+            "max_word_count": 2048,
+            "num_samples": 500000
+        },
+        "train_ratio": 0.99
+    }
+} 

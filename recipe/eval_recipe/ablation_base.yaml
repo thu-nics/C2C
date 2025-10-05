@@ -1,0 +1,28 @@
+eval:
+  answer_method: generate
+  dataset: mmlu-redux
+  gpu_ids:
+  - 0
+  - 1
+  - 2
+  - 3
+  - 4
+  - 5
+  - 6
+  - 7
+  sample_interval: 1
+  use_cot: false
+  use_template: true
+model:
+  generation_config:
+    do_sample: false
+    max_new_tokens: 8
+  model_name: Rosetta
+  rosetta_config:
+    alignment_strategy: longest
+    base_model: /share/public/public_models/Qwen3-0.6B
+    checkpoints_dir: local/checkpoints/ablation_study_general/level_0/final
+    is_do_alignment: false
+    teacher_model: Qwen/Qwen2.5-0.5B-Instruct
+output:
+  output_dir: local/ablation_results/level_0_mmlu-redux

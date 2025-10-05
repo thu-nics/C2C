@@ -1,0 +1,70 @@
+[build-system]
+requires = [ "setuptools>=61.0", "wheel",]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rosetta"
+version = "0.1.0"
+description = "Unified Memory for Multi-Model Ensemble with KV-Cache Projection"
+readme = "README.md"
+classifiers = [ "Development Status :: 3 - Alpha", "Intended Audience :: Developers", "Intended Audience :: Science/Research", "License :: OSI Approved :: MIT License", "Operating System :: OS Independent", "Programming Language :: Python :: 3", "Programming Language :: Python :: 3.8", "Programming Language :: Python :: 3.9", "Programming Language :: Python :: 3.10", "Programming Language :: Python :: 3.11", "Topic :: Scientific/Engineering :: Artificial Intelligence", "Topic :: Software Development :: Libraries :: Python Modules",]
+requires-python = ">=3.10"
+dependencies = [ "torch==2.6.0", "transformers==4.52.4",]
+
+[project.license]
+text = "MIT"
+
+[project.optional-dependencies]
+dev = [ "pytest>=6.0", "pytest-cov>=2.0", "black>=22.0", "isort>=5.0", "flake8>=4.0", "mypy>=0.900", "einops>=0.8", "matplotlib", "scikit-learn", "torchvision==0.21.0",]
+training = [ "datasets>=2.0", "accelerate>=0.20", "wandb>=0.13",]
+evaluation = [ "scikit-learn>=1.0", "matplotlib>=3.5", "seaborn>=0.11",]
+
+[project.urls]
+Homepage = "https://github.com/your-org/unified_memory"
+Repository = "https://github.com/your-org/unified_memory"
+Documentation = "https://unified-memory.readthedocs.io"
+
+[tool.black]
+line-length = 88
+target-version = [ "py38",]
+include = "\\.pyi?$"
+extend-exclude = "/(\n  # directories\n  \\.eggs\n  | \\.git\n  | \\.hg\n  | \\.mypy_cache\n  | \\.tox\n  | \\.venv\n  | build\n  | dist\n)/\n"
+
+[tool.isort]
+profile = "black"
+multi_line_output = 3
+line_length = 88
+known_first_party = [ "rosetta",]
+
+[tool.mypy]
+python_version = "3.8"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+warn_unreachable = true
+strict_equality = true
+[[tool.mypy.overrides]]
+module = [ "transformers.*", "torch.*",]
+ignore_missing_imports = true
+
+[tool.setuptools.package-data]
+rosetta = [ "*.json", "*.yaml", "*.yml",]
+
+[tool.pytest.ini_options]
+testpaths = [ "test",]
+python_files = [ "test_*.py",]
+python_classes = [ "Test*",]
+python_functions = [ "test_*",]
+addopts = [ "--strict-markers", "--strict-config", "--cov=rosetta", "--cov-report=term-missing", "--cov-report=html", "--cov-report=xml",]
+
+[tool.setuptools.packages.find]
+where = [ ".",]
+include = [ "rosetta*",]
+exclude = [ "test*", "script*",]

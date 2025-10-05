@@ -1,0 +1,24 @@
+{
+    "model": {
+        "model_name": "Rosetta",
+        "rosetta_config":{
+            "base_model": "Qwen/Qwen3-0.6B",
+            "teacher_model": "Qwen/Qwen2.5-0.5B-Instruct"
+        }
+    },
+    "output": {
+        "output_dir": "./script/analysis/venn/venn_results",
+        "result_dir": "./script/analysis/venn/venn_results"
+    },
+    "eval":{
+        "use_cot": false,
+        "gpu_ids": [0, 1, 2, 3, 4, 5, 6, 7],
+        "answer_method": "logits",
+        "checkpoints_dir": "local/checkpoints/0.6+0.5B_C2C_mmlu/final"
+    },
+    "models":{
+        "slm": "Qwen/Qwen3-0.6B",
+        "llm": "Qwen/Qwen2.5-0.5B-Instruct",
+        "rosetta": "0.6+0.5B_C2C_mmlu"
+    }
+} 

@@ -1,0 +1,40 @@
+{
+    "model": {
+        "baseline_model": "Qwen/Qwen3-0.6B"
+    },
+    "training": {
+        "learning_rate": 3e-4,
+        "weight_decay": 0.01,
+        "num_epochs": 3,
+        "max_length": 2048,
+        "device": "cuda",
+        "scheduler_type": "linear",
+        "warmup_ratio": 0.1,
+        "max_grad_norm": 1.0,
+        "per_device_train_batch_size": 4,
+        "gradient_accumulation_steps": 4,
+        "seed": 42,
+        "partial_training": {
+            "method": "layer_wise",
+            "ratio": 0.6
+        }
+    },
+    "data": {
+        "type": "MMLUChatDataset",
+        "kwargs": {
+            "split": "test",
+            "num_samples": 1000
+        },
+        "train_ratio": 0.8
+    },
+    "output": {
+        "output_dir": "outputs/baseline_partial",
+        "eval_steps": 100,
+        "save_steps": 500,
+        "wandb_config": {
+            "project": "baseline_partial_training",
+            "run_name": "baseline_partial_run",
+            "mode": "offline"
+        }
+    }
+}

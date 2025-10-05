@@ -1,0 +1,1 @@
+python script/evaluation/multi-processes_evaluator.py --config recipe/eval_recipe/aligner_eval.json

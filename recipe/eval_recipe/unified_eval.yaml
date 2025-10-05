@@ -1,0 +1,56 @@
+model:
+  # model_name: 
+  # model_name: local/checkpoints/Qwen3-0.6B_Swahili_1.6M/final # use Rosetta to test Rosetta model
+  # model_name: Jacaranda/UlizaLlama3
+  # model_name: Qwen/Qwen3-0.6B
+  # model_name: Qwen/Qwen2.5-Coder-0.5B-Instruct
+  # model_name: meta-llama/Llama-3.2-1B-Instruct
+  # model_name: /share/public/public_models/Qwen3-14B
+  # model_name: /share/public/public_models/Qwen3-8B
+  model_name: Rosetta
+  rosetta_config:  # Only needed for Rosetta models
+    base_model: Qwen/Qwen2.5-0.5B-Instruct
+    teacher_model: Qwen/Qwen3-0.6B
+  # # #   # teacher_model : /share/public/public_models/Llama-3.1-8B-Instruct
+    is_do_alignment: false
+    alignment_strategy: "longest"
+    # checkpoints_dir: local/checkpoints/0.6B+Math_general/final
+    checkpoints_dir: local/checkpoints/0.5B+0.6B_C2C_mmlu/final
+  
+  # Two stage
+  # model_name: "two_stage"  # Use two-stage pipeline
+  # answer_model_path: "Qwen/Qwen3-0.6B" # Second LLM for answering
+  # context_model_path: "Qwen/Qwen3-4B"
+  # background_prompt: "In one clear sentence, describe the most essential background knowledge needed to answer the question: {question}"
+
+  # Generation configuration - applied to all models during evaluation
+  generation_config:
+    do_sample: false  # Whether to use sampling (true) or greedy decoding (false)
+    max_new_tokens: 64  # Maximum number of tokens to generate
+    # Sampling parameters (only used when do_sample=true):
+    # temperature: 0.7  # Controls randomness (0.0 = deterministic, higher = more random)
+    # top_p: 0.8  # Nucleus sampling threshold
+    # top_k: 20  # Top-k sampling threshold
+    # # min_p: 0.05  # Minimum probability threshold
+    # # repetition_penalty: 1.0  # Penalty for repeating tokens
+    # presence_penalty: 1.5  # Penalty for repeating tokens
+    # frequency_penalty: 1.0
+
+output:
+  output_dir: local/final_results/0.5+0.6
+  # output_dir: local/GPQA_results
+  # output_dir: local/MMMLU_results
+
+eval:
+  dataset: mmlu-redux # mmlu-redux or mmmlu
+  # dataset: mmmlu
+  gpu_ids: [0,1,2,3,4,5,6,7]  # GPUs to use for evaluation
+  # gpu_ids: [7]
+  answer_method: generate  # 'generate' or 'logits'
+  use_cot: false  # Enable chain-of-thought reasoning
+  use_template: true
+  sample_interval: 1  # Sample every N examples
+  # limit:   # Limit examples per subject (null for all)
+  # subjects: ["nutrition"] # Optional: specify specific subjects to evaluate
+  # response_text: ""
+  math_grading_method: "comprehensive"

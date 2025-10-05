@@ -1,0 +1,56 @@
+{
+    "model": {
+        "base_model": "Qwen/Qwen3-0.6B",
+        "teacher_model": "Qwen/Qwen2.5-0.5B-Instruct",    
+        "is_do_alignment": false,
+        "alignment_strategy": "first",
+        "projector": {
+            "type": "C2CProjector",
+            "params": {
+                "hidden_dim": 1024,
+                "intermediate_dim": 1024,
+                "num_layers": 3,
+                "dropout": 0.1,
+                "initial_temperature": 1.0,
+                "final_temperature": 0.001,
+                "anneal_steps": 1929
+            }
+        },
+        "mapping": "last_aligned"
+    },
+    "training": {
+        "learning_rate": 1e-4,
+        "weight_decay": 0.01,
+        "num_epochs": 1,
+        "max_length": 2048,
+        "device": "cuda",
+        "scheduler_type": "linear",
+        "warmup_ratio": 0.1,
+        "max_grad_norm": 1.0,
+        "gradient_accumulation_steps": 8,
+        "per_device_train_batch_size": 4,
+        "num_processes": 8,
+        "freeze": ["teacher","base"],
+        "seed": 42
+    },
+    "output": {
+        "output_dir": "local/checkpoints/0.6+0.5B_C2C_general_again",
+        "save_steps": 500,
+        "eval_steps": 100,
+        "wandb_config": {
+            "project": "Rosetta",
+            "mode": "online",
+            "entity": "nics-efc",
+            "run_name": "0.6B+0.5B_C2C_general_OpenHermes_500k"
+        }
+    },
+    "data": {
+        "type": "OpenHermesChatDataset",
+        "kwargs": {
+            "split": "train",
+            "max_word_count": 2048,
+            "num_samples": 500000
+        },
+        "train_ratio": 0.99
+    }
+}
