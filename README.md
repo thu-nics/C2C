@@ -4,13 +4,25 @@
 
 # Cache-to-Cache: Direct Semantic Communication Between Large Language Models
 
-Cache-to-Cache (C2C) enables Large Language Models to communicate directly through their KV-Caches, bypassing text generation. By projecting and fusing KV-Caches between models, C2C achieves 8.5–10.5% higher accuracy than individual models and 3.0–5.0% better performance than text-based communication, with 2.0× speedup in latency.
+<p align="center">
+&nbsp&nbsp📑 <a href="https://arxiv.org/abs/2510.03215"><b>arXiv</b></a>&nbsp&nbsp
+</p>
 
-> **Why "Rosetta"?** The project is named after the **Rosetta Stone**, the ancient artefact that unlocked the translation of Egyptian hieroglyphs by presenting the same text in multiple scripts. Likewise, C2C translates KV-cache representations between otherwise independent LLMs, allowing them to speak a common language in a richer and more direct way.
+
+Cache-to-Cache (C2C) enables Large Language Models to communicate directly through their KV-Caches, bypassing text generation. By projecting and fusing KV-Caches between models, C2C achieves 8.5–10.5% higher accuracy than individual models and 3.0–5.0% better performance than text-based communication, with 2.0× speedup in latency.
 
 Feel free to star the repo or cite the paper if you find it interesting.
 
+```bibtex
+@article{fu2025c2c,
+    title={Cache-to-Cache: Direct Semantic Communication Between Large Language Models}, 
+    author={Tianyu Fu and Zihan Min and Hanling Zhang and Jichao Yan and Guohao Dai and Wanli Ouyang and Yu Wang},
+    journal={arXiv preprint arXiv:2510.03215},
+    year={2025},
+}
+```
 
+> **Why "Rosetta"?** The Python package is named after the **Rosetta Stone**, the ancient artefact that unlocked the translation of Egyptian hieroglyphs by presenting the same text in multiple scripts. Likewise, C2C translates KV-cache representations between otherwise independent LLMs, allowing them to speak a common language in a richer and more direct way.
 
 ## Environment Setup
 
