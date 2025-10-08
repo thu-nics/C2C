@@ -1,13 +1,15 @@
-<p align="center">
-  <img src="resource/logo.png" alt="Cache-to-Cache Logo" width="150"/>
-</p>
+<div align="center">
+  <img src="resource/logo.png" alt="Cache-to-Cache Logo" width="100"/>
+  
+  <h1>Cache-to-Cache</h1>
+  <h3>Direct Semantic Communication Between Large Language Models</h3>
 
-# Cache-to-Cache: Direct Semantic Communication Between Large Language Models
+  <p>
+    <a href="https://fuvty.github.io/C2C_Project_Page/">🌐 <b>Project Page</b></a> •
+    <a href="https://arxiv.org/abs/2510.03215">📑 <b>Paper</b></a>
+  </p>
 
-
-<p align="center">
-🌐 <a href="https://fuvty.github.io/C2C_Project_Page/"><b>Project Page</b></a>&nbsp&nbsp | &nbsp&nbsp📑 <a href="https://arxiv.org/abs/2510.03215"><b>arXiv</b></a>&nbsp&nbsp
-</p>
+</div>
 
 Cache-to-Cache (C2C) enables Large Language Models to communicate directly through their KV-Caches, bypassing text generation. By projecting and fusing KV-Caches between models, C2C achieves 8.5–10.5% higher accuracy than individual models and 3.0–5.0% better performance than text-based communication, with 2.0× speedup in latency.
 
