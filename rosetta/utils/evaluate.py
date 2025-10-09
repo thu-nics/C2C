@@ -14,8 +14,7 @@ from typing import Dict, Any, List, Tuple, Optional
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from rosetta.model.projector import load_projector
-from rosetta.model.wrapper import RosettaModel, OracleRosettaModel
-from rosetta.model.aggregator import load_aggregator
+from rosetta.model.wrapper import RosettaModel
 
 def build_prompt(dataset: str, locale: str, question: str, choices: str, use_cot: bool, use_template: bool = True) -> str:
     """

@@ -11,7 +11,6 @@ import copy
 import math
 
 from rosetta.utils.registry import register_model, get_projector_class, PROJECTOR_REGISTRY, capture_init_args, save_object, load_object
-from . import ablation_projector
 
 class Projector(nn.Module):
     """Base projector class for unified memory"""
@@ -1169,3 +1168,27 @@ class C2CProjector(Projector):
             pass
 
         return output_key, output_value
+
+def save_projector(obj: Projector, file_path: str) -> None:
+    save_object(obj, file_path)
+
+def load_projector(file_path: str, override_args: Optional[dict] = None) -> Projector:
+    return load_object(file_path, get_projector_class, override_args)
+
+def create_projector(projector_type: str, **kwargs) -> Projector:
+    """
+    Factory function to create a projector based on type.
+    
+    Args:
+        projector_type: String indicating the type of projector
+        **kwargs: Additional arguments to pass to the projector constructor
+        
+    Returns:
+        An instance of the appropriate projector
+    """
+    # Prefer using the unified registry getter (handles case-insensitive keys)
+    try:
+        cls = get_projector_class(projector_type)
+    except ValueError as e:
+        raise e
+    return cls(**kwargs)

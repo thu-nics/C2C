@@ -2,9 +2,7 @@
 Training utilities for RosettaModel
 """
 
-from .trainer import RosettaTrainer, ProjectorSaveCallback, freeze_model_components
 from .dataset_adapters import (
-    InstructCoderChatDataset, 
     ChatDataset, 
     RosettaDataCollator,
 )

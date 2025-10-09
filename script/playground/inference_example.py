@@ -11,7 +11,6 @@ from pathlib import Path
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from rosetta.model.projector import create_projector
 from rosetta.model.wrapper import RosettaModel
 from rosetta.model.aligner import TokenAligner, AlignmentStrategy
 from rosetta.model.projector import AllInOneProjector
@@ -21,7 +20,6 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from rosetta.model.projector import load_projector
 from rosetta.model.wrapper import RosettaModel
-from rosetta.model.aggregator import load_aggregator
 from rosetta.utils.evaluate import set_default_chat_template
 import re
 

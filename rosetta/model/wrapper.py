@@ -11,7 +11,6 @@ from transformers.modeling_outputs import CausalLMOutputWithPast
 import json
 
 from rosetta.model.projector import Projector
-from rosetta.model.aggregator import Aggregator
 from rosetta.model.sampling import sample_token
 from transformers.utils import ModelOutput
 try:
@@ -48,7 +47,7 @@ class RosettaModel(nn.Module):
     """
     Drop in replacement for the standard transformers LLM models, like Qwen3ForCausalLM
     """
-    def __init__(self, model_list: List[PreTrainedModel], base_model_idx = 0, projector_list: List[Projector] = [], aggregator_list: List[Aggregator] = []):
+    def __init__(self, model_list: List[PreTrainedModel], base_model_idx = 0, projector_list: List[Projector] = [], aggregator_list: List[nn.Module] = []):
         super().__init__()
         # model list: a list of model, model 0 by default is the base model
         # projector list: a list of projector
@@ -130,7 +129,7 @@ class RosettaModel(nn.Module):
         self.projector_list: List[Projector] = projector_list
 
     def load_aggregator(self, aggregator_list):
-        self.aggregator_list: List[Aggregator] = aggregator_list
+        self.aggregator_list: List[nn.Module] = aggregator_list
 
 
     def get_projector(self, 
