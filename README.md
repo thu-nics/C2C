@@ -6,7 +6,8 @@
 
   <p>
     <a href="https://fuvty.github.io/C2C_Project_Page/">🌐 <b>Project Page</b></a> •
-    <a href="https://arxiv.org/abs/2510.03215">📑 <b>Paper</b></a>
+    <a href="https://arxiv.org/abs/2510.03215">📑 <b>Paper</b></a> •
+    <a href="https://huggingface.co/collections/nics-efc/c2c-68e66ef54b977bd7e58d2d74">🤗 <b>HuggingFace</b></a>
   </p>
 
 </div>
@@ -48,6 +49,49 @@ pip install -e ".[training,evaluation]"
 ```
 
 ## How to
+
+### Use Hugging Face weights
+
+Minimal example to load published C2C weights from the Hugging Face collection and run the provided inference script:
+
+```python
+import torch
+from huggingface_hub import snapshot_download
+from script.playground.inference_example import load_rosetta_model, run_inference_example
+
+checkpoint_dir = snapshot_download(
+    repo_id="nics-efc/C2C_Fuser",
+    allow_patterns=["qwen3_0.6b+qwen2.5_0.5b_Fuser/*"],
+)
+
+model_config = {
+    "rosetta_config": {
+        "base_model": "Qwen/Qwen3-0.6B",
+        "teacher_model": "Qwen/Qwen2.5-0.5B-Instruct",
+        "checkpoints_dir": f"{checkpoint_dir}/qwen3_0.6b+qwen2.5_0.5b_Fuser/final",
+    }
+}
+
+rosetta_model, tokenizer = load_rosetta_model(model_config, eval_config={}, device=torch.device("cuda"))
+device = rosetta_model.device
+
+prompt = [{"role": "user", "content": "Say hello in one short sentence."}]
+input_text = tokenizer.apply_chat_template(prompt, tokenize=False, add_generation_prompt=True, enable_thinking=False)
+inputs = tokenizer(input_text, return_tensors="pt").to(device)
+
+instruction_index = torch.tensor([1, 0], dtype=torch.long).repeat(inputs['input_ids'].shape[1] - 1, 1).unsqueeze(0).to(device)
+label_index = torch.tensor([-1, 0], dtype=torch.long).repeat(1, 1).unsqueeze(0).to(device)
+kv_cache_index = [instruction_index, label_index]
+
+with torch.no_grad():
+    sampling_params = {
+        'do_sample': False,
+        'max_new_tokens': 256
+    }
+    outputs = rosetta_model.generate(**inputs, kv_cache_index=kv_cache_index, **sampling_params)
+    output_text = tokenizer.decode(outputs[0, instruction_index.shape[1] + 1:], skip_special_tokens=True)
+    print(f"C2C output text: {output_text}")
+```
 
 ### Run an example
 
