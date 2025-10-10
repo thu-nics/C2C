@@ -27,6 +27,12 @@ Feel free to star the repo or cite the paper if you find it interesting.
 
 > **Why "Rosetta"?** The Python package is named after the **Rosetta Stone**, the ancient artefact that unlocked the translation of Egyptian hieroglyphs by presenting the same text in multiple scripts. Likewise, C2C translates KV-cache representations between otherwise independent LLMs, allowing them to speak a common language in a richer and more direct way.
 
+
+## News
+
+[2025/10] Our paper was featured as the **#1 Paper of the Day** on [Hugging Face Daily Papers](https://huggingface.co/papers/2510.03215)
+
+
 ## Environment Setup
 
 Create a new environment:
