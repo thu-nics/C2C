@@ -1,21 +1,12 @@
 model:
-  # model_name: 
-  # model_name: local/checkpoints/Qwen3-0.6B_Swahili_1.6M/final # use Rosetta to test Rosetta model
-  # model_name: Jacaranda/UlizaLlama3
   # model_name: Qwen/Qwen3-0.6B
-  # model_name: Qwen/Qwen2.5-Coder-0.5B-Instruct
-  # model_name: meta-llama/Llama-3.2-1B-Instruct
-  # model_name: /share/public/public_models/Qwen3-14B
-  # model_name: /share/public/public_models/Qwen3-8B
   model_name: Rosetta
   rosetta_config:  # Only needed for Rosetta models
-    base_model: Qwen/Qwen2.5-0.5B-Instruct
-    teacher_model: Qwen/Qwen3-0.6B
-  # # #   # teacher_model : /share/public/public_models/Llama-3.1-8B-Instruct
+    base_model: Qwen/Qwen3-0.6B
+    teacher_model: Qwen/Qwen2.5-0.5B-Instruct
     is_do_alignment: false
     alignment_strategy: "longest"
-    # checkpoints_dir: local/checkpoints/0.6B+Math_general/final
-    checkpoints_dir: local/checkpoints/0.5B+0.6B_C2C_mmlu/final
+    checkpoints_dir: local/checkpoints/0.6+0.5B_C2C_general_again/final
   
   # Two stage
   # model_name: "two_stage"  # Use two-stage pipeline
@@ -37,15 +28,11 @@ model:
     # frequency_penalty: 1.0
 
 output:
-  output_dir: local/final_results/0.5+0.6
-  # output_dir: local/GPQA_results
-  # output_dir: local/MMMLU_results
+  output_dir: local/final_results/0.6+0.5B_C2C_general_again
 
 eval:
-  dataset: mmlu-redux # mmlu-redux or mmmlu
-  # dataset: mmmlu
-  gpu_ids: [0,1,2,3,4,5,6,7]  # GPUs to use for evaluation
-  # gpu_ids: [7]
+  dataset: mmlu-redux
+  gpu_ids: [0]  # GPUs to use for evaluation
   answer_method: generate  # 'generate' or 'logits'
   use_cot: false  # Enable chain-of-thought reasoning
   use_template: true

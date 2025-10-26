@@ -15,6 +15,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from rosetta.model.projector import load_projector
 from rosetta.model.wrapper import RosettaModel
+from rosetta.model.oracle import OracleRosettaModel
 
 def build_prompt(dataset: str, locale: str, question: str, choices: str, use_cot: bool, use_template: bool = True) -> str:
     """
@@ -387,18 +388,7 @@ def load_rosetta_model(model_config: Dict[str, Any], eval_config: Dict[str, Any]
             proj.load_state_dict(state_dict, strict=False)
         projector_list.append(proj)
     
-    # Load aggregators
-    num_aggregators = len([f for f in os.listdir(checkpoint_dir) if re.match(r"aggregator_\d+\.pt", f)])
     aggregator_list = []
-    for t in range(num_aggregators):
-        json_cfg = os.path.join(checkpoint_dir, f"aggregator_{t}.json")
-        agg_path = os.path.join(checkpoint_dir, f"aggregator_{t}.pt")
-        agg = load_aggregator(json_cfg)
-        if os.path.exists(agg_path):
-            sd = torch.load(agg_path, map_location="cpu")
-            agg.load_state_dict(sd, strict=False)
-        agg = agg.to(device)
-        aggregator_list.append(agg)
     
     # Initialize Rosetta model
     rosetta_model = RosettaModel(
@@ -468,18 +458,7 @@ def load_oracle_rosetta_model(model_config: Dict[str, Any], eval_config: Dict[st
             proj.load_state_dict(state_dict, strict=False)
         projector_list.append(proj)
     
-    # Load aggregators
-    num_aggregators = len([f for f in os.listdir(checkpoint_dir) if re.match(r"aggregator_\d+\.pt", f)])
     aggregator_list = []
-    for t in range(num_aggregators):
-        json_cfg = os.path.join(checkpoint_dir, f"aggregator_{t}.json")
-        agg_path = os.path.join(checkpoint_dir, f"aggregator_{t}.pt")
-        agg = load_aggregator(json_cfg)
-        if os.path.exists(agg_path):
-            sd = torch.load(agg_path, map_location="cpu")
-            agg.load_state_dict(sd, strict=False)
-        agg = agg.to(device)
-        aggregator_list.append(agg)
     
     # Initialize Rosetta model
     rosetta_model = OracleRosettaModel(
