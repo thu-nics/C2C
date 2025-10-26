@@ -28,7 +28,6 @@ import contextlib
 
 from rosetta.model.wrapper import RosettaModel
 from rosetta.model.projector import create_projector, save_projector
-from rosetta.model.aggregator import save_aggregator, get_aggregator_class
 from rosetta.train.dataset_adapters import ChatDataset, AlignedChatDataset, RosettaDataCollator, create_dataset, BaselineDataCollator, BaselineChatDataset
 from rosetta.model.aligner import TokenAligner, AlignmentStrategy
 from rosetta.train.model_utils import k_nearest_sources, last_aligned_sources
@@ -358,17 +357,8 @@ def setup_models(model_config: Dict[str, Any], training_mode: str, device: str =
         
         # Init RosettaModel
         # Build aggregators from config (optional)
-        aggregator_config = model_config.get("aggregator")
-        if aggregator_config:
-            aggregator_type = aggregator_config["type"]
-            aggregator_params = aggregator_config.get("params", {}).copy()
-            aggregator_cls = get_aggregator_class(aggregator_type)
-            K = int(aggregator_params.get("num_options", 1))
-            aggregator_list = [aggregator_cls(**aggregator_params) for _ in range(slm_num_layers)]
-        else:
-            # No aggregator configured
-            K = 1
-            aggregator_list = []
+        K = 1
+        aggregator_list = []
 
         rosetta_model = RosettaModel(
             model_list=[base_model, teacher_model],
@@ -951,9 +941,6 @@ def main():
                                 # We save both the trainable weights and the constructor config
                                 torch.save(proj.state_dict(), os.path.join(checkpoint_dir, f"projector_{i}.pt"))
                                 save_projector(proj, os.path.join(checkpoint_dir, f"projector_{i}.json"))
-                            for i, agg in enumerate(base_model_ref.aggregator_list):
-                                torch.save(agg.state_dict(), os.path.join(checkpoint_dir, f"aggregator_{i}.pt"))
-                                save_aggregator(agg, os.path.join(checkpoint_dir, f"aggregator_{i}.json"))
                             base_model_ref.save_projector_config(os.path.join(checkpoint_dir, "projector_config.json"))
                             base_model_ref.save_aggregator_config(os.path.join(checkpoint_dir, "aggregator_config.json"))
 
@@ -1019,9 +1006,6 @@ def main():
             for i, proj in enumerate(base_model_ref.projector_list):
                 torch.save(proj.state_dict(), os.path.join(final_dir, f"projector_{i}.pt"))
                 save_projector(proj, os.path.join(final_dir, f"projector_{i}.json"))
-            for i, agg in enumerate(base_model_ref.aggregator_list):
-                torch.save(agg.state_dict(), os.path.join(final_dir, f"aggregator_{i}.pt"))
-                save_aggregator(agg, os.path.join(final_dir, f"aggregator_{i}.json"))
             base_model_ref.save_projector_config(os.path.join(final_dir, "projector_config.json"))
             base_model_ref.save_aggregator_config(os.path.join(final_dir, "aggregator_config.json"))
 
