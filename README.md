@@ -257,7 +257,8 @@ Add evaluation logic in `script/evaluation/` following the pattern in `unified_e
 ### Qwen Family
 
 * Qwen3-0.6B + Qwen2.5-0.5B-Instruct
-* Qwen3-4B + Qwen3-0.6B
+* Qwen3-0.6B + Llama-3.2-1B-Instruct
+* Qwen3-0.6B + Qwen3-4B-Base
 
 ### Other Configurations
 
