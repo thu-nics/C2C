@@ -632,6 +632,7 @@ class RosettaModel(nn.Module):
         output_scores: Optional[bool] = None,
         max_length: Optional[int] = None,
         use_cache: bool = True,
+        streamer = None,
         *args,
         **kwargs,
     ):
@@ -699,6 +700,10 @@ class RosettaModel(nn.Module):
         current_past = prefill_output.past_key_values
         all_input_ids = base_input_ids
         current_attention_mask = base_attention_mask
+
+        # Initialize streamer with prompt if provided
+        if streamer is not None:
+            streamer.put(base_input_ids)
 
         # EOS handling setup
         eos_set = None
@@ -786,6 +791,10 @@ class RosettaModel(nn.Module):
                 dim=1,
             )
 
+            # Stream the new token if streamer provided
+            if streamer is not None:
+                streamer.put(next_token_unsqueezed)
+
             # Early stop if all sequences finished
             if eos_set is not None and torch.all(finished):
                 break
@@ -805,6 +814,10 @@ class RosettaModel(nn.Module):
             )
             current_past = decode_output.past_key_values
             last_logits = decode_output.logits[:, -1, :]
+
+        # End streaming if streamer provided
+        if streamer is not None:
+            streamer.end()
 
         # Return style compatible with HF generate
         if return_dict_in_generate:
