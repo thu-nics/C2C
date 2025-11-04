@@ -32,6 +32,27 @@ Feel free to star the repo or cite the paper if you find it interesting.
 
 [2025/10] Our paper was featured as the **#1 Paper of the Day** on [Hugging Face Daily Papers](https://huggingface.co/papers/2510.03215)
 
+## Demos
+
+<details open>
+<summary><b>Demo 1: Knowledge Sharing</b></summary>
+
+> C2C lets Qwen2.5 derive knowledge from Qwen3, which is otherwise unknown to itself due to the knowledge cutoff.
+> 
+> https://github.com/user-attachments/assets/cf2f6453-11e7-410e-b58c-38f366f73a16
+
+</details>
+
+<details>
+<summary><b>Demo 2: Combined Wisdom</b></summary>
+
+> Only by combining latent semantics from both Qwen2.5 and Qwen3 can this philosophical question be correctly answered.
+> 
+> https://github.com/user-attachments/assets/c36ffaa1-0297-4ed8-b472-1fbbd9cc397f
+
+</details>
+
+These demos can be reproduced with `script/playground/gradio_demo.py`.
 
 ## Environment Setup
 
