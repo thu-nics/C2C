@@ -7,7 +7,7 @@
   <p>
     <a href="https://fuvty.github.io/C2C_Project_Page/">🌐 <b>Project Page</b></a> •
     <a href="https://arxiv.org/abs/2510.03215">📑 <b>Paper</b></a> •
-    <a href="https://huggingface.co/collections/nics-efc/c2c-68e66ef54b977bd7e58d2d74">🤗 <b>HuggingFace</b></a>
+    <a href="https://huggingface.co/nics-efc/C2C_Fuser">🤗 <b>HuggingFace</b></a>
   </p>
 
 </div>
