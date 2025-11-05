@@ -6,7 +6,10 @@ This creates a web interface to compare three inference modes simultaneously:
 2. T2T: Two-stage inference (shows context + answer)
 3. C2C: Rosetta model with projectors
 
-All models are loaded at startup and respond to the same input in parallel.
+ZeroGPU Support:
+- Models are loaded to CPU at startup
+- @spaces.GPU decorator moves models to GPU on-demand for each inference
+- Works seamlessly on both ZeroGPU and regular GPU environments
 """
 
 import os
@@ -18,8 +21,10 @@ from pathlib import Path
 from typing import Optional, Generator
 from queue import Queue
 from threading import Thread
-
 from transformers import AutoTokenizer, AutoModelForCausalLM, TextIteratorStreamer
+import spaces 
+ZEROGPU_AVAILABLE = os.getenv("ZERO_GPU", "").lower() == "true" # ZeroGPU support - HuggingFace Spaces sets ZERO_GPU=true when ZeroGPU is available
+
 from rosetta.utils.evaluate import load_rosetta_model, load_hf_model, set_default_chat_template
 from rosetta.model.wrapper import RosettaModel
 from rosetta.baseline.multi_stage import TwoStageInference
@@ -30,11 +35,11 @@ class ModelManager:
     
     def __init__(
         self,
-        single_model_name: str = "Qwen/Qwen2.5-0.5B-Instruct",
-        t2t_context_model: str = "Qwen/Qwen3-0.6B",
-        t2t_answer_model: str = "Qwen/Qwen2.5-0.5B-Instruct",
+        single_model_name: str = "Qwen/Qwen3-0.6B",
+        t2t_context_model: str = "Qwen/Qwen2.5-0.5B-Instruct",
+        t2t_answer_model: str = "Qwen/Qwen3-0.6B",
         c2c_checkpoint_path: str = "local/checkpoints/qwen3_0.6b+qwen2.5_0.5b_Fuser",
-        device: str = "cuda"
+        device: str = "auto"
     ):
         """
         Initialize ModelManager with model configurations.
@@ -46,8 +51,13 @@ class ModelManager:
             c2c_checkpoint_path: Path to C2C checkpoint directory
             device: Device to use (cuda, cpu, or auto)
         """
+        # For ZeroGPU, load models to CPU and move to GPU in decorated functions
         if device == "auto":
-            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            if ZEROGPU_AVAILABLE:
+                self.device = torch.device("cpu")
+                print("ZeroGPU detected: Loading models to CPU (will move to GPU on-demand)")
+            else:
+                self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         else:
             self.device = torch.device(device)
         print(f"Using device: {self.device}")
@@ -116,21 +126,24 @@ class ModelManager:
     
     def _load_c2c_model(self):
         """Load Rosetta (C2C) model."""
-        print(f"\n[C2C] Loading Rosetta model from {self.c2c_checkpoint_path}...")
+        print(f"\n[C2C] Loading from {self.c2c_checkpoint_path}...")
         
-        # Check if checkpoint exists
+        # Auto-download if checkpoint doesn't exist
         if not Path(self.c2c_checkpoint_path).exists():
-            raise FileNotFoundError(
-                f"C2C checkpoint not found: {self.c2c_checkpoint_path}\n"
-                "You can download the checkpoints automatically with:\n"
-                "    from huggingface_hub import snapshot_download\n"
-                "    snapshot_download(\n"
-                "        repo_id='nics-efc/C2C_Fuser',\n"
-                "        allow_patterns=['qwen3_0.6b+qwen2.5_0.5b_Fuser/*'],\n"
-                "        local_dir='local/checkpoints'\n"
-                "    )\n"
-                "Or see the project README for more details."
-            )
+            print("[C2C] Downloading checkpoint from HuggingFace (may take a few minutes)...")
+            try:
+                from huggingface_hub import snapshot_download
+                checkpoint_name = Path(self.c2c_checkpoint_path).name
+                snapshot_download(
+                    repo_id='nics-efc/C2C_Fuser',
+                    allow_patterns=[f'{checkpoint_name}/*'],
+                    local_dir=str(Path(self.c2c_checkpoint_path).parent)
+                )
+                print("[C2C] ✓ Download complete")
+            except ImportError:
+                raise ImportError("Install huggingface_hub: pip install huggingface_hub")
+            except Exception as e:
+                raise RuntimeError(f"Download failed: {e}\nManual download: https://huggingface.co/nics-efc/C2C_Fuser")
         
         # Load config
         import yaml
@@ -205,13 +218,19 @@ class ModelManager:
         
         return kwargs
     
+    @spaces.GPU(duration=60)
     def generate_single(self, user_input: str) -> Generator[str, None, None]:
         """Generate response from single model with streaming."""
+        # Move model to GPU for ZeroGPU
+        device = torch.device("cuda" if ZEROGPU_AVAILABLE else self.device)
+        if ZEROGPU_AVAILABLE and self.single_model.device.type != "cuda":
+            self.single_model.to(device)
+        
         messages = [{"role": "system", "content": ""}, {"role": "user", "content": user_input}]
         text = self.single_tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
         )
-        inputs = self.single_tokenizer(text, return_tensors="pt").to(self.device)
+        inputs = self.single_tokenizer(text, return_tensors="pt").to(device)
         
         # Setup streamer
         streamer = TextIteratorStreamer(
@@ -238,8 +257,17 @@ class ModelManager:
             generated_text += token
             yield generated_text
     
+    @spaces.GPU(duration=90)
     def generate_t2t(self, user_input: str) -> Generator[tuple[str, str], None, None]:
         """Generate response from T2T model with streaming (returns context, answer)."""
+        # Move models to GPU for ZeroGPU
+        device = torch.device("cuda" if ZEROGPU_AVAILABLE else self.device)
+        if ZEROGPU_AVAILABLE:
+            if self.t2t_model.context_model.device.type != "cuda":
+                self.t2t_model.context_model.to(device)
+            if self.t2t_model.answer_model.device.type != "cuda":
+                self.t2t_model.answer_model.to(device)
+        
         # Stage 1: Context generation
         context_streamer = TextIteratorStreamer(
             self.t2t_model.context_tokenizer,
@@ -254,7 +282,7 @@ class ModelManager:
             add_generation_prompt=True,
             return_tensors="pt",
             enable_thinking=False
-        ).to(self.device)
+        ).to(device)
         
         generation_kwargs = {
             'input_ids': inputs,
@@ -303,7 +331,7 @@ class ModelManager:
             add_generation_prompt=True,
             return_tensors="pt",
             enable_thinking=False
-        ).to(self.device)
+        ).to(device)
         
         generation_kwargs = {
             'input_ids': inputs,
@@ -321,13 +349,19 @@ class ModelManager:
             answer_text += token
             yield context_text, answer_text
     
+    @spaces.GPU(duration=60)
     def generate_c2c(self, user_input: str) -> Generator[str, None, None]:
         """Generate response from C2C model with streaming."""
+        # Move model to GPU for ZeroGPU
+        device = torch.device("cuda" if ZEROGPU_AVAILABLE else self.device)
+        if ZEROGPU_AVAILABLE and self.c2c_model.device.type != "cuda":
+            self.c2c_model.to(device)
+        
         messages = [{"role": "system", "content": ""}, {"role": "user", "content": user_input}]
         text = self.c2c_tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
         )
-        inputs = self.c2c_tokenizer(text, return_tensors="pt").to(self.device)
+        inputs = self.c2c_tokenizer(text, return_tensors="pt").to(device)
         
         # Setup streamer
         streamer = TextIteratorStreamer(
@@ -340,12 +374,12 @@ class ModelManager:
         full_length = inputs.input_ids.shape[1]
         instruction_index = torch.tensor([1, 0], dtype=torch.long).repeat(
             full_length - 1, 1
-        ).unsqueeze(0).to(self.device)
+        ).unsqueeze(0).to(device)
         label_index = torch.tensor([-1, 0], dtype=torch.long).repeat(
             1, 1
-        ).unsqueeze(0).to(self.device)
+        ).unsqueeze(0).to(device)
         position_ids = inputs.attention_mask.long().cumsum(-1) - 1 if inputs.attention_mask is not None else \
-                      torch.arange(full_length, dtype=torch.long).unsqueeze(0).to(self.device)
+                      torch.arange(full_length, dtype=torch.long).unsqueeze(0).to(device)
         
         # Generation parameters
         generation_kwargs = {
@@ -432,7 +466,7 @@ D. Whether plants have interests.""",
         # Header with logo
         with gr.Row():
             with gr.Column(scale=1, min_width=100):
-                gr.Image("resource/logo.png", show_label=False, show_download_button=False, container=False, height=80)
+                gr.Image("https://raw.githubusercontent.com/thu-nics/C2C/main/resource/logo.png", show_label=False, show_download_button=False, container=False, height=80)
             with gr.Column(scale=5):
                 gr.Markdown("# Cache-to-Cache Communication Demo")
                 gr.Markdown("Compare three inference modes side-by-side: **Single** | **Text-to-Text Communication** | **Cache-to-Cache Communication**")
@@ -499,7 +533,7 @@ D. Whether plants have interests.""",
             # C2C column
             with gr.Column():
                 gr.Markdown("### Cache-to-Cache Communication")
-                gr.Markdown(f"*{model_manager.c2c_base_model} → {model_manager.c2c_teacher_model}*")
+                gr.Markdown(f"*{model_manager.c2c_teacher_model} → {model_manager.c2c_base_model}*")
                 c2c_output = gr.Textbox(
                     label="",
                     lines=18,
@@ -550,7 +584,21 @@ def main():
     print("=" * 60)
     
     # Initialize models
-    model_manager = ModelManager()
+    # C2C-S: qwen3_0.6b+qwen2.5_0.5b_Fuser
+    context_model_name = "Qwen/Qwen2.5-0.5B-Instruct"
+    c2c_checkpoint_path = "local/checkpoints/qwen3_0.6b+qwen2.5_0.5b_Fuser"
+
+    # C2C-L: qwen3_0.6b+qwen2.5_0.5b_Fuser_large
+    # context_model_name = "Qwen/Qwen3-4B-Base"
+    # c2c_checkpoint_path = "local/checkpoints/qwen3_0.6b+qwen3_4b_base_Fuser"
+
+    answer_model_name = "Qwen/Qwen3-0.6B"
+    model_manager = ModelManager(
+        single_model_name=answer_model_name,
+        t2t_context_model=context_model_name,
+        t2t_answer_model=answer_model_name,
+        c2c_checkpoint_path=c2c_checkpoint_path
+    )
     
     # Create and launch demo
     demo = create_demo(model_manager)
