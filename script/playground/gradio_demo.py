@@ -7,8 +7,9 @@ This creates a web interface to compare three inference modes simultaneously:
 3. C2C: Rosetta model with projectors
 
 ZeroGPU Support:
-- Models are loaded to CPU at startup
-- @spaces.GPU decorator moves models to GPU on-demand for each inference
+- Models are loaded to CUDA if available
+- @spaces.GPU decorator handles device allocation automatically
+- Inputs are moved to match the model's actual device
 - Works seamlessly on both ZeroGPU and regular GPU environments
 """
 
@@ -51,16 +52,15 @@ class ModelManager:
             c2c_checkpoint_path: Path to C2C checkpoint directory
             device: Device to use (cuda, cpu, or auto)
         """
-        # For ZeroGPU, load models to CPU and move to GPU in decorated functions
+        # Always use CUDA if available, ZeroGPU handles the rest
         if device == "auto":
-            if ZEROGPU_AVAILABLE:
-                self.device = torch.device("cpu")
-                print("ZeroGPU detected: Loading models to CPU (will move to GPU on-demand)")
-            else:
-                self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         else:
             self.device = torch.device(device)
+        
         print(f"Using device: {self.device}")
+        if ZEROGPU_AVAILABLE:
+            print("ZeroGPU environment detected")
         
         # Model configurations
         self.single_model_name = single_model_name
@@ -71,8 +71,8 @@ class ModelManager:
         # T2T prompt configurations
         self.t2t_background_prompt = "Briefly describe the most useful background to answer the question:\n\n{question}"
         self.t2t_answer_prompt = "Based on the background, answer the question:\n\n{question}"  # Format for second round question
-        self.t2t_context_max_tokens = 512
-        self.t2t_answer_max_tokens = 512
+        self.t2t_context_max_tokens = 256
+        self.t2t_answer_max_tokens = 256
         
         # Generation configuration (shared across all models)
         # To enable sampling: set use_sampling=True and adjust temperature/top_p/top_k
@@ -218,19 +218,15 @@ class ModelManager:
         
         return kwargs
     
-    @spaces.GPU(duration=60)
+    @spaces.GPU(duration=30)
     def generate_single(self, user_input: str) -> Generator[str, None, None]:
         """Generate response from single model with streaming."""
-        # Move model to GPU for ZeroGPU
-        device = torch.device("cuda" if ZEROGPU_AVAILABLE else self.device)
-        if ZEROGPU_AVAILABLE and self.single_model.device.type != "cuda":
-            self.single_model.to(device)
-        
         messages = [{"role": "system", "content": ""}, {"role": "user", "content": user_input}]
         text = self.single_tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
         )
-        inputs = self.single_tokenizer(text, return_tensors="pt").to(device)
+        # Use the model's actual device (ZeroGPU handles device placement)
+        inputs = self.single_tokenizer(text, return_tensors="pt").to(self.single_model.device)
         
         # Setup streamer
         streamer = TextIteratorStreamer(
@@ -260,14 +256,6 @@ class ModelManager:
     @spaces.GPU(duration=90)
     def generate_t2t(self, user_input: str) -> Generator[tuple[str, str], None, None]:
         """Generate response from T2T model with streaming (returns context, answer)."""
-        # Move models to GPU for ZeroGPU
-        device = torch.device("cuda" if ZEROGPU_AVAILABLE else self.device)
-        if ZEROGPU_AVAILABLE:
-            if self.t2t_model.context_model.device.type != "cuda":
-                self.t2t_model.context_model.to(device)
-            if self.t2t_model.answer_model.device.type != "cuda":
-                self.t2t_model.answer_model.to(device)
-        
         # Stage 1: Context generation
         context_streamer = TextIteratorStreamer(
             self.t2t_model.context_tokenizer,
@@ -282,7 +270,7 @@ class ModelManager:
             add_generation_prompt=True,
             return_tensors="pt",
             enable_thinking=False
-        ).to(device)
+        ).to(self.t2t_model.context_model.device)
         
         generation_kwargs = {
             'input_ids': inputs,
@@ -331,7 +319,7 @@ class ModelManager:
             add_generation_prompt=True,
             return_tensors="pt",
             enable_thinking=False
-        ).to(device)
+        ).to(self.t2t_model.answer_model.device)
         
         generation_kwargs = {
             'input_ids': inputs,
@@ -349,19 +337,15 @@ class ModelManager:
             answer_text += token
             yield context_text, answer_text
     
-    @spaces.GPU(duration=60)
+    @spaces.GPU(duration=30)
     def generate_c2c(self, user_input: str) -> Generator[str, None, None]:
         """Generate response from C2C model with streaming."""
-        # Move model to GPU for ZeroGPU
-        device = torch.device("cuda" if ZEROGPU_AVAILABLE else self.device)
-        if ZEROGPU_AVAILABLE and self.c2c_model.device.type != "cuda":
-            self.c2c_model.to(device)
-        
         messages = [{"role": "system", "content": ""}, {"role": "user", "content": user_input}]
         text = self.c2c_tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
         )
-        inputs = self.c2c_tokenizer(text, return_tensors="pt").to(device)
+        # Use the model's actual device (ZeroGPU handles device placement)
+        inputs = self.c2c_tokenizer(text, return_tensors="pt").to(self.c2c_model.device)
         
         # Setup streamer
         streamer = TextIteratorStreamer(
@@ -374,12 +358,12 @@ class ModelManager:
         full_length = inputs.input_ids.shape[1]
         instruction_index = torch.tensor([1, 0], dtype=torch.long).repeat(
             full_length - 1, 1
-        ).unsqueeze(0).to(device)
+        ).unsqueeze(0).to(self.c2c_model.device)
         label_index = torch.tensor([-1, 0], dtype=torch.long).repeat(
             1, 1
-        ).unsqueeze(0).to(device)
+        ).unsqueeze(0).to(self.c2c_model.device)
         position_ids = inputs.attention_mask.long().cumsum(-1) - 1 if inputs.attention_mask is not None else \
-                      torch.arange(full_length, dtype=torch.long).unsqueeze(0).to(device)
+                      torch.arange(full_length, dtype=torch.long).unsqueeze(0).to(self.c2c_model.device)
         
         # Generation parameters
         generation_kwargs = {
@@ -413,7 +397,12 @@ A. Why the act of destroying nature might be immoral.
 B. Why people who destroy the environment might be bad people.
 C. How the decision to preserve the environment benefits the environment.
 D. Whether plants have interests.""",
-        "example2": "Which company launched the Gemini 1.5 Pro model in early 2024?"
+        "example2": """Why is the Mars Exploration Rover Spirit currently tilted towards the north?
+
+A. Because it’s climbing up a big hill.
+B. Because it’s in the southern hemisphere where it is winter now.
+C. Because it’s in the northern hemisphere where it is winter now.
+D. Because one of its wheels broke."""
     }
     
     def respond(user_input: str):
@@ -480,7 +469,7 @@ D. Whether plants have interests.""",
         gr.Markdown("Example Questions:")
         with gr.Row():
             example1_btn = gr.Button("📝 Example 1: Philosophy", size="sm")
-            example2_btn = gr.Button("📝 Example 2: Knowledge Cutoff", size="sm")
+            example2_btn = gr.Button("📝 Example 2: Astronomy", size="sm")
 
 
         with gr.Row():
@@ -573,6 +562,25 @@ D. Whether plants have interests.""",
             inputs=None,
             outputs=[user_input]
         )
+        
+        # Disclaimer notice
+        gr.Markdown("---")
+        gr.Markdown("""
+        ### ⚠️ Disclaimer
+        
+        This demo is provided for **research purposes only** on an **"AS-IS" basis without warranties of any kind**. 
+        
+        - C2C models are trained only on English corpus and are in early experimental stages.
+        - Models may generate harmful, biased, or inaccurate content.
+        - Generated outputs do not represent the views or opinions of the creators.
+        - **Users are solely responsible** for any use of generated content and use this demo at their own risk.
+        - We assume **no liability** for any damages, losses, or consequences arising from the use of this demo or its outputs.
+        
+        ---
+        
+        C2C is not perfect and is in its early stages, representing a new communication paradigm. 
+        **We welcome the community to explore the possibilities of C2C with us!** 🚀
+        """)
     
     return demo
 
