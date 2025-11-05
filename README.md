@@ -7,7 +7,8 @@
   <p>
     <a href="https://fuvty.github.io/C2C_Project_Page/">🌐 <b>Project Page</b></a> •
     <a href="https://arxiv.org/abs/2510.03215">📑 <b>Paper</b></a> •
-    <a href="https://huggingface.co/nics-efc/C2C_Fuser">🤗 <b>HuggingFace</b></a>
+    <a href="https://huggingface.co/nics-efc/C2C_Fuser">🤗 <b>HuggingFace</b></a> •
+    <a href="https://huggingface.co/spaces/nics-efc/C2C_demo">🚀 <b>Live Demo</b></a>
   </p>
 
 </div>
@@ -30,21 +31,14 @@ Feel free to star the repo or cite the paper if you find it interesting.
 
 ## News
 
+[2025/11] Thank you for the enthusiasm from the community! 🚀 [Live demo](https://huggingface.co/spaces/nics-efc/C2C_demo) is now available! Try C2C in action with side-by-side model comparison.
+
 [2025/10] Our paper was featured as the **#1 Paper of the Day** on [Hugging Face Daily Papers](https://huggingface.co/papers/2510.03215)
 
-## Demos
+## Demo
 
 <details open>
-<summary><b>Demo 1: Knowledge Sharing</b></summary>
-
-> C2C lets Qwen2.5 derive knowledge from Qwen3, which is otherwise unknown to itself due to the knowledge cutoff.
-> 
-> https://github.com/user-attachments/assets/cf2f6453-11e7-410e-b58c-38f366f73a16
-
-</details>
-
-<details>
-<summary><b>Demo 2: Combined Wisdom</b></summary>
+<summary><b>Combined Wisdom</b></summary>
 
 > Only by combining latent semantics from both Qwen2.5 and Qwen3 can this philosophical question be correctly answered.
 > 
@@ -52,7 +46,7 @@ Feel free to star the repo or cite the paper if you find it interesting.
 
 </details>
 
-These demos can be reproduced with `script/playground/gradio_demo.py`.
+The demo can be reproduced with `script/playground/gradio_demo.py`.
 
 ## Environment Setup
 
