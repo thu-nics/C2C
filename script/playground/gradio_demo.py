@@ -69,10 +69,10 @@ class ModelManager:
         self.c2c_checkpoint_path = c2c_checkpoint_path
         
         # T2T prompt configurations
-        self.t2t_background_prompt = "Briefly describe the most useful background to answer the question:\n\n{question}"
-        self.t2t_answer_prompt = "Based on the background, answer the question:\n\n{question}"  # Format for second round question
+        self.t2t_background_prompt = "In one clear sentence, describe the most essential background knowledge needed to answer the question:\n\n{question}\n\nDo NOT directly solve or give answer to the question."
+        self.t2t_answer_prompt = "Based on the background, accurately answer the question:\n\n{question}"  # Format for second round question
         self.t2t_context_max_tokens = 256
-        self.t2t_answer_max_tokens = 256
+        self.t2t_answer_max_tokens = 512
         
         # Generation configuration (shared across all models)
         # To enable sampling: set use_sampling=True and adjust temperature/top_p/top_k
@@ -372,7 +372,7 @@ class ModelManager:
             'attention_mask': inputs.attention_mask,
             'position_ids': position_ids,
             'streamer': streamer,
-            **self._get_generation_kwargs(max_new_tokens=2048)
+            **self._get_generation_kwargs(max_new_tokens=self.t2t_answer_max_tokens)
         }
         
         # Run generation in separate thread
@@ -391,18 +391,13 @@ def create_demo(model_manager: ModelManager):
     
     # Preset example questions
     EXAMPLE_QUESTIONS = {
-        "example1": """Instead of asking why the act of destroying the environment might be immoral, Hill wants to ask ...
-
-A. Why the act of destroying nature might be immoral.
-B. Why people who destroy the environment might be bad people.
-C. How the decision to preserve the environment benefits the environment.
-D. Whether plants have interests.""",
-        "example2": """Why is the Mars Exploration Rover Spirit currently tilted towards the north?
+        "example1": """Why is the Mars Exploration Rover Spirit currently tilted towards the north?
 
 A. Because it’s climbing up a big hill.
 B. Because it’s in the southern hemisphere where it is winter now.
 C. Because it’s in the northern hemisphere where it is winter now.
-D. Because one of its wheels broke."""
+D. Because one of its wheels broke.""",
+        "example2": """In an experiment, you have two saltwater samples. The first is 500g at 20% concentration, and the second is 300g at 10% concentration. If you mix them together, what will be the mass percent of salt in the final solution? (Give your answer to one decimal place)."""
     }
     
     def respond(user_input: str):
@@ -468,8 +463,8 @@ D. Because one of its wheels broke."""
         # Preset question examples
         gr.Markdown("Example Questions:")
         with gr.Row():
-            example1_btn = gr.Button("📝 Example 1: Philosophy", size="sm")
-            example2_btn = gr.Button("📝 Example 2: Astronomy", size="sm")
+            example1_btn = gr.Button("📝 Example 1: Astronomy", size="sm")
+            example2_btn = gr.Button("📝 Example 2: Simple Math", size="sm")
 
 
         with gr.Row():
@@ -593,12 +588,12 @@ def main():
     
     # Initialize models
     # C2C-S: qwen3_0.6b+qwen2.5_0.5b_Fuser
-    context_model_name = "Qwen/Qwen2.5-0.5B-Instruct"
-    c2c_checkpoint_path = "local/checkpoints/qwen3_0.6b+qwen2.5_0.5b_Fuser"
+    # context_model_name = "Qwen/Qwen2.5-0.5B-Instruct"
+    # c2c_checkpoint_path = "local/checkpoints/qwen3_0.6b+qwen2.5_0.5b_Fuser"
 
     # C2C-L: qwen3_0.6b+qwen2.5_0.5b_Fuser_large
-    # context_model_name = "Qwen/Qwen3-4B-Base"
-    # c2c_checkpoint_path = "local/checkpoints/qwen3_0.6b+qwen3_4b_base_Fuser"
+    context_model_name = "Qwen/Qwen3-4B-Base"
+    c2c_checkpoint_path = "local/checkpoints/qwen3_0.6b+qwen3_4b_base_Fuser"
 
     answer_model_name = "Qwen/Qwen3-0.6B"
     model_manager = ModelManager(
