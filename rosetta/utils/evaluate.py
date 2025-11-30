@@ -439,7 +439,6 @@ def load_rosetta_model(model_config: Dict[str, Any], eval_config: Dict[str, Any]
         base_model_idx=0,
         projector_list=projector_list,
         aggregator_list=[],
-        include_response=rosetta_config["include_response"],
         multi_source_fusion_mode=multi_source_fusion_mode,
     ).to(device).eval()
 

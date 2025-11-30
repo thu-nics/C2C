@@ -13,9 +13,13 @@ logs/
 eval_results/
 outputs/
 results/
+checkpoints/
+
 recipe/experiments/
 script/evaluation/deprecated/
+script/analysis/oracle/
+
+# Special files
 run.sh
 test.py
-script/analysis/oracle/
 script/train/SFT_train_debug.py

@@ -31,9 +31,11 @@ Feel free to star the repo or cite the paper if you find it interesting.
 
 ## News
 
-[2025/11] Thank you for the enthusiasm from the community! 🚀 [Live demo](https://huggingface.co/spaces/nics-efc/C2C_demo) is now available! Try C2C in action with side-by-side model comparison.
+[2025/12] 🧪 Multi-sharer support is now available! Fuse KV-caches from multiple sharer models to a single receiver. This feature is in preliminary stages and we are still actively working on it. See `live_chat_example.py` for usage.
 
-[2025/10] Our paper was featured as the **#1 Paper of the Day** on [Hugging Face Daily Papers](https://huggingface.co/papers/2510.03215)
+[2025/11] 🚀 Thank you for the enthusiasm from the community! [Live demo](https://huggingface.co/spaces/nics-efc/C2C_demo) is now available! Try C2C in action with side-by-side model comparison.
+
+[2025/10] 🤗 Our paper was featured as the **#1 Paper of the Day** on [Hugging Face Daily Papers](https://huggingface.co/papers/2510.03215)
 
 ## Demo
 
@@ -119,7 +121,11 @@ with torch.no_grad():
 We provide an interactive chat example to demonstrate cache-to-cache communication with pre-trained projectors in `script/playground/live_chat_example.py`.
 
 ```bash
-python script/playground/live_chat_example.py --checkpoint_dir PATH_TO_CHECKPOINT
+# Single sharer
+python script/playground/live_chat_example.py --checkpoint_dir path/to/checkpoint
+
+# Multiple sharers (teacher models read from each checkpoint's config.json)
+python script/playground/live_chat_example.py --checkpoint_dir path/to/ckpt1 path/to/ckpt2
 ```
 
 ### Apply Cache-to-Cache
@@ -132,7 +138,7 @@ from transformers import AutoModelForCausalLM
 from rosetta.model.wrapper import RosettaModel
 from rosetta.model.projector import C2CProjector
 
-# Load target and source models
+# Load target (receiver) and source (sharer) models
 target_model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen3-0.6B")
 source_model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen2.5-0.5B-Instruct")
 
@@ -162,13 +168,13 @@ for idx, layer_idx in enumerate(range(target_model.config.num_hidden_layers)):
         projector_idx=idx
     )
 
-# Use the model as usual, only pass in the kv_cache_index to indicate the source and target model for each token
+# Generate: kv_cache_index controls when to apply C2C projection
+# [1, 0] = apply projection from sharer 1, [-1, 0] = no projection
 seq_len = input_ids.shape[1]
 instruction_index = torch.tensor([1, 0], dtype=torch.long).repeat(seq_len-1, 1)[None, :, :]
 response_index = torch.tensor([[-1, 0]], dtype=torch.long)[None, :, :]
-kv_cache_index = [torch.tensor([[1, 0]], dtype=torch.long)]
 outputs = c2c_model.generate(
-    kv_cache_index=[instruction_index, response_index]
+    kv_cache_index=[instruction_index, response_index],
     input_ids=inputs.input_ids,
 )
 ```

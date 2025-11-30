@@ -47,7 +47,7 @@ class RosettaModel(nn.Module):
     """
     Drop in replacement for the standard transformers LLM models, like Qwen3ForCausalLM
     """
-    def __init__(self, model_list: List[PreTrainedModel], base_model_idx = 0, projector_list: List[Projector] = [], aggregator_list: List[nn.Module] = [], multi_source_fusion_mode: str = "sequential"):
+    def __init__(self, model_list: List[PreTrainedModel], base_model_idx = 0, projector_list: List[Projector] = [], aggregator_list: List[nn.Module] = [], multi_source_fusion_mode: str = "parallel"):
         super().__init__()
         # model list: a list of model, model 0 by default is the base model
         # projector list: a list of projector
@@ -241,12 +241,15 @@ class RosettaModel(nn.Module):
     ) -> CausalLMOutputWithPast:
         """
         Forward pass
-        KVCache index is a list of tensors with shape (B, sec_seq_len, 2), indicating the source and target kv cache model index
-
-        If input_ids is LongTensor, default to same input ids for different models
-        If input_ids is Tuple, default to different input ids for different models.
-
-        No Rosetta: (-1, 0)
+        
+        kv_cache_index: List of tensors with shape (B, sec_seq_len, 2).
+            The first element [i][0][0][0] controls sharer selection:
+            - -1: No projection (receiver only, skip all sharers)
+            - 0: Self projection (receiver projects from itself) - not currently used
+            - >0: Bitmask selecting sharers (1 (001)=sharer1, 2 (010)=sharer2, 3 (011)=both, 7 (111)=all three)
+            Each bit corresponds to a sharer: bit i selects sharer at model_list[i+1].
+        
+        input_ids: If LongTensor, same input for all models. If List, per-model inputs.
         """
         
         # noqa
@@ -352,12 +355,16 @@ class RosettaModel(nn.Module):
 
                 # calculate source model kvcache and apply projections
                 if self.base_model_idx in self.projector_dict:
-                    if kv_cache_index[i][0][0][0].item() != -1:
+                    sharer_mask = kv_cache_index[i][0][0][0].item()
+                    if sharer_mask > 0:
                         base_cache = clone_kv_cache(curr_base_kv_cache)
                         parallel_delta_cache = {} if self.multi_source_fusion_mode == "parallel" else None
                         
-                        # Compute and apply projections (shared logic for both modes)
+                        # Compute and apply projections for selected sharers (bitmask)
                         for source_model_idx in self.projector_dict[self.base_model_idx].keys():
+                            # Check if this sharer is selected: bit (source_model_idx - 1)
+                            if not (sharer_mask & (1 << (source_model_idx - 1))):
+                                continue
                             if self.multi_source_fusion_mode == "sequential":
                                 base_cache_ref = curr_base_kv_cache
                             else:
