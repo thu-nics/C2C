@@ -1,0 +1,69 @@
+# Multi-round evaluation examples for training
+# Each example has:
+#   - system_prompt: optional system prompt for the conversation
+#   - messages: list of user/assistant turns
+#   - drop_rounds: dict mapping round_id -> list of rounds to drop before generating that round
+#                  e.g., {2: [1]} means drop round 1 before generating round 2's response
+
+examples:
+  - name: "math_followup"
+    system_prompt: "You are a helpful assistant."
+    messages:
+      - role: user
+        content: "What is 15 + 27?"
+      - role: assistant
+        content: "15 + 27 = 42"
+      - role: user
+        content: "Now multiply that result by 3."
+    drop_rounds:
+      2: [1]  # Drop round 1 (first Q&A) before generating round 2's response
+
+  - name: "memory_test"
+    system_prompt: "You are a helpful assistant."
+    messages:
+      - role: user
+        content: "My favorite color is blue and my lucky number is 7."
+      - role: assistant
+        content: "Got it! Your favorite color is blue and your lucky number is 7."
+      - role: user
+        content: "What is my lucky number?"
+      - role: assistant
+        content: "Your lucky number is 7."
+      - role: user
+        content: "What is my favorite color?"
+      - role: assistant
+        content: "Your favorite color is blue."
+    drop_rounds:
+      2: [1]  # Drop round 1 before generating round 2's response
+      # 3: [2]  # Drop round 1 before generating round 2's response
+
+  # - name: "coding_context"
+  #   messages:
+  #     - role: user
+  #       content: "Write a Python function to calculate factorial."
+  #     - role: assistant
+  #       content: "def factorial(n):\n    if n <= 1:\n        return 1\n    return n * factorial(n - 1)"
+  #     - role: user
+  #       content: "Now add a docstring to the function."
+  #   drop_rounds: [0]
+
+  # - name: "story_continuation"
+  #   messages:
+  #     - role: user
+  #       content: "Start a story about a robot named Alex who lives in 2150."
+  #     - role: assistant
+  #       content: "In the year 2150, Alex was no ordinary robot. Unlike the mass-produced service units, Alex had developed something unexpected - curiosity."
+  #     - role: user
+  #       content: "What happens when Alex discovers an old library?"
+  #   drop_rounds: []
+
+  # - name: "translation_chain"
+  #   messages:
+  #     - role: user
+  #       content: "Translate 'Hello, how are you?' to French."
+  #     - role: assistant
+  #       content: "Bonjour, comment allez-vous?"
+  #     - role: user
+  #       content: "Now translate the French phrase to Spanish."
+  #   drop_rounds: [0]
+
