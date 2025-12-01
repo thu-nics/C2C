@@ -78,7 +78,7 @@ def main():
         help="HuggingFace model name"
     )
     
-    parser.add_argument("--examples_yaml", type=str, default="script/train/examples.yaml")
+    parser.add_argument("--examples_yaml", type=str, default="script/context/examples.yaml")
     parser.add_argument("--example_name", type=str, default=None)
     args = parser.parse_args()
 
