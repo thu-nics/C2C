@@ -1,69 +1,55 @@
 # Multi-round evaluation examples for training
 # Each example has:
 #   - system_prompt: optional system prompt for the conversation
-#   - messages: list of user/assistant turns
-#   - drop_rounds: dict mapping round_id -> list of rounds to drop before generating that round
-#                  e.g., {2: [1]} means drop round 1 before generating round 2's response
+#   - user_messages: list of user messages (assistant responses are generated)
+#   - drop_messages: dict mapping message_id -> list of message IDs to drop before generating
+#
+# Message IDs are assigned sequentially:
+#   - ID 0 = system prompt
+#   - ID 1 = first user message
+#   - ID 2 = first assistant response (generated)
+#   - ID 3 = second user message
+#   - ID 4 = second assistant response (generated)
+#   - etc.
+#
+# Example: {3: [1, 2]} means when generating response to message 3 (second user),
+#          drop messages 1 and 2 (first user + first assistant) after prefill.
 
 examples:
   - name: "math_followup"
     system_prompt: "You are a helpful assistant."
-    messages:
-      - role: user
-        content: "What is 15 + 27?"
-      - role: assistant
-        content: "15 + 27 = 42"
-      - role: user
-        content: "Now multiply that result by 3."
-    drop_rounds:
-      2: [1]  # Drop round 1 (first Q&A) before generating round 2's response
+    user_messages:
+      - "What is 15 + 27?"           # ID 1, response will be ID 2
+      - "Now multiply that result by 3."  # ID 3, response will be ID 4
+    drop_messages:
+      3: [1, 2]  # When generating response to user message 3, drop messages 1 & 2 (first Q&A)
 
   - name: "memory_test"
     system_prompt: "You are a helpful assistant."
-    messages:
-      - role: user
-        content: "My favorite color is blue and my lucky number is 7."
-      - role: assistant
-        content: "Got it! Your favorite color is blue and your lucky number is 7."
-      - role: user
-        content: "What is my lucky number?"
-      - role: assistant
-        content: "Your lucky number is 7."
-      - role: user
-        content: "What is my favorite color?"
-      - role: assistant
-        content: "Your favorite color is blue."
-    drop_rounds:
-      2: [1]  # Drop round 1 before generating round 2's response
-      # 3: [2]  # Drop round 1 before generating round 2's response
+    user_messages:
+      - "My favorite color is blue and my lucky number is 7."  # ID 1
+      - "What is my lucky number?"    # ID 3
+      - "What is my favorite color?"  # ID 5
+    drop_messages:
+      3: [1, 2]  # When generating response to message 3, drop messages 1 & 2
 
   # - name: "coding_context"
-  #   messages:
-  #     - role: user
-  #       content: "Write a Python function to calculate factorial."
-  #     - role: assistant
-  #       content: "def factorial(n):\n    if n <= 1:\n        return 1\n    return n * factorial(n - 1)"
-  #     - role: user
-  #       content: "Now add a docstring to the function."
-  #   drop_rounds: [0]
+  #   user_messages:
+  #     - "Write a Python function to calculate factorial."  # ID 1
+  #     - "Now add a docstring to the function."             # ID 3
+  #   drop_messages:
+  #     3: [0]  # Drop system prompt before generating response to message 3
 
   # - name: "story_continuation"
-  #   messages:
-  #     - role: user
-  #       content: "Start a story about a robot named Alex who lives in 2150."
-  #     - role: assistant
-  #       content: "In the year 2150, Alex was no ordinary robot. Unlike the mass-produced service units, Alex had developed something unexpected - curiosity."
-  #     - role: user
-  #       content: "What happens when Alex discovers an old library?"
-  #   drop_rounds: []
+  #   user_messages:
+  #     - "Start a story about a robot named Alex who lives in 2150."  # ID 1
+  #     - "What happens when Alex discovers an old library?"           # ID 3
+  #   drop_messages: {}  # No drops
 
   # - name: "translation_chain"
-  #   messages:
-  #     - role: user
-  #       content: "Translate 'Hello, how are you?' to French."
-  #     - role: assistant
-  #       content: "Bonjour, comment allez-vous?"
-  #     - role: user
-  #       content: "Now translate the French phrase to Spanish."
-  #   drop_rounds: [0]
+  #   user_messages:
+  #     - "Translate 'Hello, how are you?' to French."      # ID 1
+  #     - "Now translate the French phrase to Spanish."     # ID 3
+  #   drop_messages:
+  #     3: [0]  # Drop system prompt before generating response to message 3
 

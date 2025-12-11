@@ -1,8 +1,12 @@
+from dataclasses import dataclass, field
+from typing import Dict, List, Literal, Optional, Union
+
 import torch
 
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from transformers.cache_utils import DynamicCache
 
+from rosetta.context.utils import top_k_top_p_filtering
 
 class ContextualModel:
     """Wrapper around HF model for explicit KV cache management with segment IDs.
@@ -127,29 +131,45 @@ class ContextualModel:
         
         return outputs
 
-    def generate(self, input_ids, id: int, max_new_tokens=50, temperature=0.0, drop_ids_after_prefill=None):
+    def generate_step(
+        self,
+        input_ids,
+        input_id: int,
+        output_id: Optional[int] = None,
+        max_new_tokens=50,
+        temperature=0.0,
+        top_p=1.0,
+        top_k=0,
+        drop_ids_after_prefill=None,
+    ):
         """
         Generate response using manual decoding loop.
         
         Args:
             input_ids: Prompt tokens (will be appended to cache first).
-            id: Segment ID for both prompt and generated tokens.
+            input_id: Segment ID for the input/prompt tokens.
+            output_id: Segment ID for the generated tokens. If None, uses input_id.
             max_new_tokens: Maximum tokens to generate.
             temperature: Sampling temperature (0 = greedy).
+            top_p: Nucleus sampling threshold (1.0 disables).
+            top_k: Top-k sampling threshold (0 disables).
             drop_ids_after_prefill: IDs to drop after prefilling but before generation.
                 This enables "context transfer" where the prompt sees the context,
                 but the generated response does not.
         Returns:
             Generated text (excluding prompt).
         """
+        if output_id is None:
+            output_id = input_id
+            
         if input_ids.dim() == 1:
             input_ids = input_ids.unsqueeze(0)
         
         if input_ids.shape[1] == 0:
             raise ValueError("input_ids cannot be empty.")
         
-        # Prefill prompt (with full context)
-        outputs = self.append(input_ids, id=id)
+        # Prefill prompt (with full context) using input_id
+        outputs = self.append(input_ids, id=input_id)
         next_token_logits = outputs.logits[:, -1, :]
         
         # Lazy drop: remove context after prefill but before generation
@@ -161,7 +181,9 @@ class ContextualModel:
         for _ in range(max_new_tokens):
             # Sample next token
             if temperature > 0:
-                probs = torch.softmax(next_token_logits / temperature, dim=-1)
+                logits = next_token_logits / temperature
+                logits = top_k_top_p_filtering(logits, top_k=top_k, top_p=top_p)
+                probs = torch.softmax(logits, dim=-1)
                 next_token = torch.multinomial(probs, num_samples=1)
             else:
                 next_token = torch.argmax(next_token_logits, dim=-1, keepdim=True)
@@ -173,11 +195,12 @@ class ContextualModel:
                 
             generated_ids.append(token_id)
             
-            # Append token to cache and get next logits
-            outputs = self.append(next_token, id=id)
+            # Append token to cache with output_id (different from input_id)
+            outputs = self.append(next_token, id=output_id)
             next_token_logits = outputs.logits[:, -1, :]
         
         return self.tokenizer.decode(generated_ids, skip_special_tokens=True)
+
 
     def drop_context(self, remove_ids):
         """
