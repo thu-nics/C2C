@@ -211,6 +211,9 @@ def generate_with_contextual_mask(
     messages: List[dict],
     drop_ids: Optional[Dict[int, List[int]]] = None,
     max_new_tokens: int = 256,
+    temperature: float = 0.0,
+    top_p: float = 1.0,
+    top_k: int = 0,
 ) -> str:
     """
     Generate a response using contextual attention mask to simulate dropping.
@@ -264,6 +267,9 @@ def generate_with_contextual_mask(
         generation_config={"max_new_tokens": max_new_tokens, "eos_token_id": tokenizer.eos_token_id},
         left_padding=None,
         context_kwargs=ctx,
+        temperature=temperature,
+        top_p=top_p,
+        top_k=top_k,
     )
     return tokenizer.decode(gen_ids, skip_special_tokens=True)
 
@@ -310,7 +316,18 @@ def prepare_context(
     }
 
 
-def generate(model, input_ids, generation_config=None, left_padding=None, context_kwargs=None, **kwargs):
+def generate(
+    model,
+    input_ids,
+    generation_config=None,
+    left_padding=None,
+    context_kwargs=None,
+    *,
+    temperature: float = 0.0,
+    top_p: float = 1.0,
+    top_k: int = 0,
+    **kwargs,
+):
     """
     One-shot prefill + decode generation that simulates KV-dropping via attention masks.
 
@@ -385,7 +402,13 @@ def generate(model, input_ids, generation_config=None, left_padding=None, contex
     current_pos = seq_len
 
     for _ in range(max_new_tokens):
-        next_token = torch.argmax(next_token_logits, dim=-1, keepdim=True)
+        if float(temperature) > 0.0:
+            logits = next_token_logits / float(temperature)
+            logits = top_k_top_p_filtering(logits, top_k=int(top_k), top_p=float(top_p))
+            probs = torch.softmax(logits, dim=-1)
+            next_token = torch.multinomial(probs, num_samples=1)
+        else:
+            next_token = torch.argmax(next_token_logits, dim=-1, keepdim=True)
         token_id = int(next_token.item())
         if eos_token_id is not None and token_id == int(eos_token_id):
             break

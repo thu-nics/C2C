@@ -140,7 +140,7 @@ class ContextualModel:
         temperature=0.0,
         top_p=1.0,
         top_k=0,
-        drop_ids=None,
+        drop_ids: Optional[List[int]] = None,
     ):
         """
         Generate response using manual decoding loop.

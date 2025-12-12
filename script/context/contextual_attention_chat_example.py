@@ -108,7 +108,7 @@ def compare_methods(model, tokenizer, example: dict):
     Run the same example with both ContextualModel and ContextualAttentionModel
     to compare their outputs.
     """
-    from rosetta.context.context import ContextualModel
+    from rosetta.context.contextual import ContextualModel
     
     name = example.get("name", "unnamed")
     print(f"\n{'='*70}")
