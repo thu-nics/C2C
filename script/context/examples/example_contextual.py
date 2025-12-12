@@ -25,7 +25,7 @@ import yaml
 
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
-from rosetta.context.context import ContextualModel
+from rosetta.context.contextual import ContextualModel
 
 
 def load_examples(yaml_path: str) -> list:
@@ -82,7 +82,7 @@ def run_example(ctx_model: ContextualModel, example: dict):
             gen_prompt_ids, 
             input_id=user_id,      # Generation prompt tokens get user's ID
             output_id=assistant_id, # Generated tokens get assistant's ID
-            drop_ids_after_prefill=drop_ids
+            drop_ids=drop_ids
         )
         
         all_messages.append({"role": "assistant", "content": response})

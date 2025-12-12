@@ -17,7 +17,7 @@ import yaml
 
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from rosetta.context.context_attention import generate_with_contextual_mask
+from rosetta.context.attention import generate_with_contextual_mask
 
 
 def load_examples(yaml_path: str) -> list:
@@ -54,7 +54,7 @@ def run_example(model, tokenizer, example: dict, max_new_tokens: int):
             model,
             tokenizer,
             messages,
-            messages_to_drop=drop_messages_config,
+            drop_ids=drop_messages_config,
             max_new_tokens=max_new_tokens,
         )
 

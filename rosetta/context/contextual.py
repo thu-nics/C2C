@@ -140,7 +140,7 @@ class ContextualModel:
         temperature=0.0,
         top_p=1.0,
         top_k=0,
-        drop_ids_after_prefill=None,
+        drop_ids=None,
     ):
         """
         Generate response using manual decoding loop.
@@ -173,8 +173,8 @@ class ContextualModel:
         next_token_logits = outputs.logits[:, -1, :]
         
         # Lazy drop: remove context after prefill but before generation
-        if drop_ids_after_prefill is not None and len(drop_ids_after_prefill) > 0:
-            self.drop_context(drop_ids_after_prefill)
+        if drop_ids is not None and len(drop_ids) > 0:
+            self.drop_context(drop_ids)
         
         generated_ids = []
         
