@@ -16,8 +16,89 @@ from typing import List, Tuple, Optional, Dict, Any
 from rosetta.context.utils import top_k_top_p_filtering
 from rosetta.context.utils import _print_eval_results, _log_to_wandb, HAS_WANDB
 
+def tokenize_conversation_round_by_round(
+    tokenizer, 
+    messages: List[dict], 
+    enable_thinking: bool = False,
+) -> Tuple[torch.Tensor, List[Tuple[int, int, str, int]]]:
+    """
+    Tokenize conversation round by round, matching ContextualModel's incremental tokenization.
+    
+    Pattern (from contextual_chat_example.py):
+    - For user: tokenize with add_generation_prompt=True, record user + gen_prompt boundary
+    - For assistant: tokenize without gen_prompt, record assistant boundary (content after gen_prompt)
+    
+    Returns:
+        (input_ids, boundaries) where boundaries is list of (start, end, role, msg_id)
+    """
+    if not messages:
+        return torch.empty((1, 0), dtype=torch.long), []
+
+    def _apply(messages_, add_generation_prompt: bool) -> torch.Tensor:
+        return tokenizer.apply_chat_template(
+            messages_,
+            tokenize=True,
+            return_tensors="pt",
+            add_generation_prompt=add_generation_prompt,
+            enable_thinking=enable_thinking,
+        )
+
+    all_input_ids: List[torch.Tensor] = []
+    boundaries: List[Tuple[int, int, str, int]] = []
+
+    current_messages: List[dict] = []
+    seq_len = 0
+
+    for msg_id, msg in enumerate(messages):
+        role = msg.get("role")
+        content = msg.get("content", "")
+        if role not in ("system", "user", "assistant"):
+            raise ValueError(f"Unsupported role: {role}")
+
+        start = seq_len
+
+        if role in ("system", "user"):
+            # Add message to the chat-template stream, then slice ONLY the newly-added tokens.
+            current_messages.append({"role": role, "content": content})
+
+            full_no_gen = _apply(current_messages, add_generation_prompt=False)
+            new_ids = full_no_gen[:, seq_len:]
+            if new_ids.numel() > 0:
+                all_input_ids.append(new_ids)
+                seq_len += new_ids.shape[1]
+
+            # User messages also include the generation prompt tokens, attributed to the same msg_id.
+            if role == "user":
+                full_with_gen = _apply(current_messages, add_generation_prompt=True)
+                gen_prompt_ids = full_with_gen[:, seq_len:]
+                if gen_prompt_ids.numel() > 0:
+                    all_input_ids.append(gen_prompt_ids)
+                    seq_len += gen_prompt_ids.shape[1]
+
+            boundaries.append((start, seq_len, role, msg_id))
+            continue
+
+        # Assistant: before appending assistant content, ensure the stream up to the previous user
+        # has already contributed its generation-prompt tokens (handled in the "user" branch above).
+        #
+        # Then append assistant tokens directly after the stream (no chat-template wrapper here).
+        assistant_ids = tokenizer(content, return_tensors="pt", add_special_tokens=False).input_ids
+        if assistant_ids.numel() > 0:
+            all_input_ids.append(assistant_ids)
+            seq_len += assistant_ids.shape[1]
+
+        boundaries.append((start, seq_len, role, msg_id))
+        current_messages.append({"role": "assistant", "content": content})
+
+    if not all_input_ids:
+        return torch.empty((1, 0), dtype=torch.long), boundaries
+    return torch.cat(all_input_ids, dim=1), boundaries
+
+
 def get_round_boundaries(tokenizer, messages, max_length: int = 2048) -> List[Tuple[int, int, str, int]]:
     """
+    Deprecated: use tokenize_conversation_round_by_round instead
+
     Get token boundaries for each message in the conversation.
     
     Args:
@@ -26,8 +107,9 @@ def get_round_boundaries(tokenizer, messages, max_length: int = 2048) -> List[Tu
         max_length: Maximum sequence length
         
     Returns:
-        List of (start_idx, end_idx, role, round_idx) tuples.
-        round_idx groups user+assistant pairs: user[0], assistant[0] -> round 0
+        List of (start_idx, end_idx, role, msg_id) tuples.
+        msg_id is the message index (0, 1, 2, ...) - each message gets its own ID.
+        This matches the ID assignment in ContextualModel.generate_step().
     """
     boundaries = []
     current_pos = 0
@@ -43,41 +125,37 @@ def get_round_boundaries(tokenizer, messages, max_length: int = 2048) -> List[Tu
         tokens = tokenizer(text, return_tensors="pt", truncation=True, 
                           max_length=max_length, add_special_tokens=False)
         end_pos = tokens.input_ids.shape[1]
-        round_idx = i // 2
-        boundaries.append((current_pos, end_pos, msg["role"], round_idx))
+        msg_id = i  # Each message gets its own ID (matching generate_step behavior)
+        boundaries.append((current_pos, end_pos, msg["role"], msg_id))
         current_pos = end_pos
     
     return boundaries
-
-
+    
 def build_contextual_attention_mask(
     seq_len: int,
-    round_boundaries: List[Tuple[int, int, str, int]],
-    rounds_to_drop: List[int],
-    device: torch.device,
+    msg_boundaries: List[Tuple[int, int, str, int]],
+    messages_to_drop: Optional[Dict[int, List[int]]] = None,
+    device: torch.device = None,
     dtype: torch.dtype = torch.float32,
-    drop_at_round: Optional[Dict[int, List[int]]] = None,
 ) -> torch.Tensor:
     """
     Build a custom 4D attention mask that simulates KV dropping.
     
-    This matches the behavior of ContextualModel where dropped rounds are
+    This matches the behavior of ContextualModel where dropped messages are
     permanently removed from the cache.
     
-    Rules (for a round dropped at round X):
-    - User tokens in round X CAN see dropped round (prefill behavior)
-    - Assistant tokens in round X CANNOT see dropped round (generation behavior)
-    - ALL tokens in rounds > X CANNOT see dropped round (it's gone!)
+    Rules (for messages in messages_to_drop[X] dropped at message X):
+    - Messages with msg_id <= X CAN see dropped messages (before/at drop point)
+    - Messages with msg_id > X CANNOT see dropped messages (after drop point)
     
     Args:
         seq_len: Total sequence length
-        round_boundaries: List of (start_idx, end_idx, role, round_idx)
-        rounds_to_drop: List of round indices to drop (simple mode: all dropped at last round)
+        msg_boundaries: List of (start_idx, end_idx, role, msg_id)
+        messages_to_drop: Dict mapping {msg_id_when_drop_happens: [msg_ids_to_drop]}.
+                         E.g., {3: [1, 2]} means drop messages 1 and 2 at message 3.
+                         Messages 0-3 can see 1,2; messages 4+ cannot see 1,2.
         device: Torch device
         dtype: Torch dtype
-        drop_at_round: Optional dict mapping {round_where_drop_happens: [rounds_to_drop]}.
-                       If provided, overrides rounds_to_drop for fine-grained control.
-                       E.g., {2: [1]} means round 1 is dropped when generating round 2.
     
     Returns:
         attention_mask: (1, 1, seq_len, seq_len) mask
@@ -89,45 +167,39 @@ def build_contextual_attention_mask(
         diagonal=1
     )
     
-    # Build effective drop mapping: for each dropped round, at which round was it dropped?
-    # drop_info[dropped_round] = round_where_it_was_dropped
+    if messages_to_drop is None or len(messages_to_drop) == 0:
+        return mask.unsqueeze(0).unsqueeze(0)
+    
+    # Build effective drop mapping: for each dropped message, at which message was it dropped?
+    # drop_info[dropped_msg_id] = msg_id_when_it_was_dropped
     drop_info: Dict[int, int] = {}
     
-    if drop_at_round is not None:
-        # Fine-grained control: {round_where_drop_happens: [rounds_to_drop]}
-        for drop_at, dropped_rounds in drop_at_round.items():
-            for dr in dropped_rounds:
-                drop_info[dr] = drop_at
-    else:
-        # Simple mode: all rounds in rounds_to_drop are dropped at the last round
-        max_round = max(b[3] for b in round_boundaries) if round_boundaries else 0
-        for dr in rounds_to_drop:
-            drop_info[dr] = max_round
+    for drop_at_msg_id, dropped_msg_ids in messages_to_drop.items():
+        for dm in dropped_msg_ids:
+            # If a message is dropped at multiple points, use the earliest
+            if dm not in drop_info or drop_at_msg_id < drop_info[dm]:
+                drop_info[dm] = drop_at_msg_id
     
-    # Apply masking for each dropped round
-    for drop_round_idx, dropped_at_round in drop_info.items():
-        # Find the token range of the dropped round
-        drop_positions = []
-        for start, end, role, round_idx in round_boundaries:
-            if round_idx == drop_round_idx:
-                drop_positions.extend(range(start, end))
+    # Apply masking for each dropped message
+    for dropped_msg_id, dropped_at_msg_id in drop_info.items():
+        # Find the token range of the dropped message
+        drop_start, drop_end = None, None
+        for start, end, role, msg_id in msg_boundaries:
+            if msg_id == dropped_msg_id:
+                drop_start = start
+                drop_end = end
+                break
         
-        if not drop_positions:
+        if drop_start is None:
             continue
         
-        drop_start = min(drop_positions)
-        drop_end = max(drop_positions) + 1
-        
         # Apply masking based on when the drop happened
-        for start, end, role, round_idx in round_boundaries:
-            if round_idx == dropped_at_round:
-                # Round where drop happens:
-                # - User tokens CAN see (prefill)
-                # - Assistant tokens CANNOT see (generation after drop)
-                if role == "assistant":
-                    mask[start:end, drop_start:drop_end] = float('-inf')
-            elif round_idx > dropped_at_round:
-                # All subsequent rounds: dropped round is gone
+        # The drop happens AT dropped_at_msg_id, meaning:
+        # - msg_id <= dropped_at_msg_id: CAN see dropped messages (before/at drop point)
+        # - msg_id > dropped_at_msg_id: CANNOT see dropped messages (after drop)
+        for start, end, role, msg_id in msg_boundaries:
+            if msg_id > dropped_at_msg_id:
+                # All messages after the drop point cannot see dropped messages
                 mask[start:end, drop_start:drop_end] = float('-inf')
     
     return mask.unsqueeze(0).unsqueeze(0)
@@ -137,7 +209,7 @@ def generate_with_contextual_mask(
     model,
     tokenizer,
     messages: List[dict],
-    rounds_to_drop: Optional[List[int]] = None,
+    messages_to_drop: Optional[Dict[int, List[int]]] = None,
     max_new_tokens: int = 256,
 ) -> str:
     """
@@ -147,96 +219,125 @@ def generate_with_contextual_mask(
     evaluation (with dropping) and standard generation (without dropping) to ensure
     consistency.
     
-    Behavior matches ContextualModel:
-    - User tokens in current round CAN see dropped rounds (prefill)
-    - Assistant tokens (generated) CANNOT see dropped rounds
+    Behavior matches ContextualModel.generate_step():
+    - User tokens (prefill) CAN see messages to be dropped
+    - Assistant tokens (generated) CANNOT see dropped messages
+    - Message IDs are assigned per-message (0, 1, 2, ...), matching generate_step
     
     Args:
         model: The model (unwrapped)
         tokenizer: Tokenizer
         messages: Conversation messages (ending with a user message)
-        rounds_to_drop: Which rounds are already dropped. If None or empty, standard generation.
+        messages_to_drop: Dict mapping {msg_id_when_drop_happens: [msg_ids_to_drop]}.
+                         E.g., {2: [0, 1]} means drop messages 0 and 1 when generating
+                         the response after message 2.
+                         If None or empty, standard generation.
         max_new_tokens: Maximum tokens to generate
         
     Returns:
         Generated response string
     """
-    if rounds_to_drop is None:
-        rounds_to_drop = []
-    
+    """
+    One-shot prefill + decode generation that simulates KV-dropping via attention masks.
+
+    This function is intentionally a *single-turn* primitive: it generates the assistant
+    response for a conversation that ends with a user message. Multi-round behavior is
+    achieved by calling this function repeatedly outside (as in the examples).
+
+    Semantics (matching `ContextualModel.generate_step` / examples.yaml ID scheme):
+    - Let `input_id` be the ID of the last user message (the last element in `messages`).
+    - The generation prompt tokens are treated as part of `input_id`.
+    - Generated assistant tokens are treated as `output_id = input_id + 1`.
+    - Drops at key `input_id` are applied AFTER prefill of the generation prompt:
+        - Prefill uses drops with drop_at < input_id
+        - Decode uses drops with drop_at <= input_id
+    """
+
+    if messages_to_drop is None:
+        messages_to_drop = {}
+
+    if not messages or messages[-1].get("role") != "user":
+        raise ValueError("messages must be non-empty and end with a user message.")
+
     device = next(model.parameters()).device
     dtype = next(model.parameters()).dtype
+
+    input_id = len(messages) - 1
+    output_id = input_id + 1  # (kept for clarity; output tokens conceptually have this id)
+
+    # Normalize drop dict keys to ints (YAML gives ints; some callers may pass strings)
+    drop_events: Dict[int, List[int]] = messages_to_drop 
     
-    # Tokenize conversation with generation prompt
-    text = tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True,
-        enable_thinking=False,
+    # Tokenize conversation round by round (user includes gen_prompt, assistant is content only)
+    input_ids, boundaries = tokenize_conversation_round_by_round(
+        tokenizer, messages, enable_thinking=False,
     )
-    inputs = tokenizer(text, return_tensors="pt", add_special_tokens=False).to(device)
-    input_ids = inputs.input_ids
+    input_ids = input_ids.to(device)
     seq_len = input_ids.shape[1]
-    
-    # Get round boundaries
-    boundaries = get_round_boundaries(tokenizer, messages)
-    
-    # Determine current round (the one we're generating for)
-    # The last message should be a user message, and we're generating the assistant response
-    # Round index = message_index // 2, so for user at index 2, round = 1
-    # The assistant response will be in the same round as the last user message
-    current_round = max(b[3] for b in boundaries) if boundaries else 0
-    
-    # Build drop_at_round: all specified rounds are dropped at current round
-    # This means: user tokens in current round CAN see them (prefill), 
-    # but the assistant tokens we generate CANNOT see them
-    drop_at_round = {current_round: rounds_to_drop} if rounds_to_drop else None
-    
-    # Build contextual attention mask
+
+    # Prefill happens before applying drop at input_id; decode happens after.
+    prefill_drop = {k: v for k, v in drop_events.items() if k < input_id} or None
+    decode_drop = {k: v for k, v in drop_events.items() if k <= input_id} or None
+
+    # One-shot prefill with a 4D contextual mask
     attn_mask_4d = build_contextual_attention_mask(
         seq_len=seq_len,
-        round_boundaries=boundaries,
-        rounds_to_drop=[],  # Not used when drop_at_round is provided
+        msg_boundaries=boundaries,
+        messages_to_drop=prefill_drop,
         device=device,
         dtype=dtype,
-        drop_at_round=drop_at_round,
     )
-    
-    # Prefill with custom mask
+
+    position_ids = torch.arange(seq_len, dtype=torch.long, device=device).unsqueeze(0)
     with torch.no_grad():
         outputs = model(
             input_ids=input_ids,
+            position_ids=position_ids,
             attention_mask=attn_mask_4d,
             use_cache=True,
             return_dict=True,
         )
         past_key_values = outputs.past_key_values
         next_token_logits = outputs.logits[:, -1, :]
-    
-    # Generate token by token
-    generated_ids = []
+
+    # For decode, compute the dropped message spans (columns) that output_id must not attend to.
+    dropped_msg_ids: List[int] = []
+    if decode_drop:
+        for _, ids in decode_drop.items():
+            dropped_msg_ids.extend(ids)
+    dropped_msg_set = set(dropped_msg_ids)
+
+    dropped_spans: List[Tuple[int, int]] = []
+    if dropped_msg_set:
+        for start, end, _, mid in boundaries:
+            if mid in dropped_msg_set:
+                dropped_spans.append((start, end))
+
+    # Decode token by token
+    generated_ids: List[int] = []
     current_pos = seq_len
-    
+
     for _ in range(max_new_tokens):
         next_token = torch.argmax(next_token_logits, dim=-1, keepdim=True)
         token_id = next_token.item()
-        
+
         if token_id == tokenizer.eos_token_id:
             break
-        
+
         generated_ids.append(token_id)
-        
-        # Build attention mask row for new assistant token
-        # It cannot attend to dropped rounds (if any)
+
+        # Build attention mask row for the new assistant token (conceptually msg_id=output_id)
+        # It must not attend to dropped message columns (after drop is applied).
         new_mask_row = torch.zeros(1, 1, 1, current_pos + 1, device=device, dtype=dtype)
-        for drop_round_idx in rounds_to_drop:
-            for start, end, role, round_idx in boundaries:
-                if round_idx == drop_round_idx:
-                    new_mask_row[:, :, :, start:end] = float('-inf')
-        
+        for start, end in dropped_spans:
+            new_mask_row[:, :, :, start:end] = float("-inf")
+
+        new_position_ids = torch.tensor([[current_pos]], dtype=torch.long, device=device)
+
         with torch.no_grad():
             outputs = model(
                 input_ids=next_token,
+                position_ids=new_position_ids,
                 attention_mask=new_mask_row,
                 past_key_values=past_key_values,
                 use_cache=True,
@@ -244,9 +345,9 @@ def generate_with_contextual_mask(
             )
             past_key_values = outputs.past_key_values
             next_token_logits = outputs.logits[:, -1, :]
-        
+
         current_pos += 1
-    
+
     return tokenizer.decode(generated_ids, skip_special_tokens=True)
 
 
@@ -512,6 +613,18 @@ def run_evaluation(
     Generate responses for evaluation examples with sequential multi-round generation.
     Each round's response is generated by the model and used as context for the next round.
     
+    YAML format expected:
+        - system_prompt: optional system prompt (ID 0 if present)
+        - user_messages: list of user message strings
+        - drop_messages: {msg_id_when_drop_happens: [msg_ids_to_drop]}
+    
+    Message IDs (matching generate_step):
+        - ID 0 = system prompt (if present)
+        - ID 1 = first user message
+        - ID 2 = first assistant response
+        - ID 3 = second user message
+        - etc.
+    
     Args:
         model: The model to evaluate
         tokenizer: Tokenizer for the model
@@ -519,7 +632,7 @@ def run_evaluation(
         accelerator: Accelerator instance
         global_step: Current training step
         max_new_tokens: Max tokens to generate per response
-        use_drop: If True, apply drop_rounds using contextual attention mask
+        use_drop: If True, apply drop_messages using contextual attention mask
         
     Returns:
         List of evaluation results
@@ -531,46 +644,41 @@ def run_evaluation(
     
     for example in eval_examples:
         name = example.get("name", "unnamed")
-        original_messages = example.get("messages", [])
-        drop_rounds = example.get("drop_rounds", [])
+        system_prompt = example.get("system_prompt", None)
+        user_messages = example.get("user_messages", [])
+        # drop_messages: {msg_id_when_drop_happens: [msg_ids_to_drop]}
+        drop_messages = example.get("drop_messages", {})
         
-        if not original_messages:
+        if not user_messages:
             continue
         
-        # Extract user messages from the example
-        user_messages = [m["content"] for m in original_messages if m["role"] == "user"]
-        
         # Generate responses sequentially, using model's own responses as context
+        # Include system prompt if present (ID 0)
         messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        
         generated_responses = []
         
         for turn_idx, user_msg in enumerate(user_messages):
             # Add user message
             messages.append({"role": "user", "content": user_msg})
             
-            # Determine which rounds to drop for THIS turn
-            # drop_rounds can be:
-            #   - A dict: {round_where_drop_happens: [rounds_to_drop]}
-            #   - A list: [rounds_to_drop] (legacy, drop at last round)
-            current_round = turn_idx + 1  # Round numbering: 1-indexed for generation
+            # Current message ID = len(messages) - 1 (0-indexed)
+            # With system prompt: ID 0 = system, ID 1 = first user, etc.
+            current_msg_id = len(messages) - 1
             
-            if use_drop and drop_rounds:
-                if isinstance(drop_rounds, dict):
-                    # New format: get rounds to drop at this specific round
-                    # Accumulate all rounds that should be dropped by now
-                    rounds_dropped_by_now = []
-                    for drop_at, rounds in drop_rounds.items():
-                        if drop_at <= current_round:
-                            rounds_dropped_by_now.extend(rounds)
-                    effective_drop_rounds = rounds_dropped_by_now
-                else:
-                    # Legacy list format: drop all specified rounds
-                    effective_drop_rounds = drop_rounds
+            # Determine which messages to drop for THIS turn
+            # drop_messages format: {msg_id_when_drop_happens: [msg_ids_to_drop]}
+            if use_drop and drop_messages:
+                # Pass the full drop_messages dict; generate_with_contextual_mask
+                # will handle accumulating drops based on current_msg_id
+                effective_drop_messages = drop_messages
             else:
-                effective_drop_rounds = []
+                effective_drop_messages = {}
             
             response = generate_with_contextual_mask(
-                unwrapped_model, tokenizer, messages, effective_drop_rounds, max_new_tokens
+                unwrapped_model, tokenizer, messages, effective_drop_messages, max_new_tokens
             )
             
             # Add model's response to conversation context
@@ -581,7 +689,7 @@ def run_evaluation(
             "name": name,
             "user_messages": user_messages,
             "generated_responses": generated_responses,
-            "drop_rounds": drop_rounds,
+            "drop_messages": drop_messages,
             "full_conversation": messages,
         })
     
