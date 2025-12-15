@@ -1,24 +1,9 @@
-import os
-import uuid
-from typing import List, Tuple, Dict, Optional
-from colorama import Fore
-from dotenv import load_dotenv
+from typing import Tuple, Optional
 
-from camel.agents import ChatAgent, SearchAgent
-from camel.loaders import Firecrawl
-from camel.messages import BaseMessage
-from camel.models import BaseModelBackend, ModelFactory
-from camel.prompts import TextPrompt
-from camel.responses import ChatAgentResponse
-from camel.types import RoleType, OpenAIBackendRole
-from camel.types import ModelPlatformType
-from camel.societies import RolePlaying
-from camel.utils import print_text_animated
+from camel.agents import ChatAgent
+from camel.models import BaseModelBackend
 from camel.toolkits import FunctionTool, SearchToolkit
 from camel.tasks import Task
-from camel.tasks.task_prompt import TASK_DECOMPOSE_PROMPT, TASK_COMPOSE_PROMPT
-from camel.memories import ChatHistoryMemory, MemoryRecord
-from transformers import AutoTokenizer
 
 from rosetta.context.track import InteractionTracker, record_interaction
 from rosetta.context.workflow.prompt import SEARCH_TASK_DECOMPOSE_PROMPT, RESPONSE_PROMPT_DIRECT, SEARCH_AGENT_PROMPT
