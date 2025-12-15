@@ -6,8 +6,8 @@ from camel.toolkits import FunctionTool, SearchToolkit
 from camel.tasks import Task
 
 from rosetta.context.track import InteractionTracker, record_interaction
-from rosetta.context.workflow.prompt import SEARCH_TASK_DECOMPOSE_PROMPT, RESPONSE_PROMPT_DIRECT, SEARCH_AGENT_PROMPT
-from rosetta.context.workflow.camel_utils import convert_to_camel_messages
+from rosetta.workflow.prompt import SEARCH_TASK_DECOMPOSE_PROMPT, RESPONSE_PROMPT_DIRECT, SEARCH_AGENT_PROMPT
+from rosetta.workflow.camel_utils import convert_to_camel_messages
 
 def direct_subagent_research(
     question: str,

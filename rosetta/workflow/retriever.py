@@ -4,7 +4,7 @@ from typing import Any
 
 from camel.storages import QdrantStorage, VectorDBQuery
 
-from rosetta.context.search_engine.embeddings import SGLangEmbedding
+from rosetta.workflow.embeddings import SGLangEmbedding
 
 # Default configuration
 DB_PATH = "local/data/qdrant_hotpotqa"

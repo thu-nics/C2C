@@ -5,12 +5,12 @@ from tqdm import tqdm
 
 from camel.storages import QdrantStorage, VectorDBQuery, VectorRecord
 
-from rosetta.context.workflow.embeddings import SGLangEmbedding
+from rosetta.workflow.embeddings import SGLangEmbedding
 
 # Configuration
 DB_PATH = "local/data/qdrant_hotpotqa"
 COLLECTION_NAME = "hotpotqa_articles"
-BATCH_SIZE = 1024
+BATCH_SIZE = 128
 
 
 def main():

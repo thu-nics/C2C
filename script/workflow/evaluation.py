@@ -23,7 +23,7 @@ from camel.models import ModelFactory
 from camel.types import ModelPlatformType
 
 from rosetta.context.track import InteractionTracker
-from rosetta.context.workflow.research_flow import direct_subagent_research
+from rosetta.workflow.research_flow import direct_subagent_research
 
 
 _ANSWER_LINE_RE = re.compile(
@@ -156,7 +156,7 @@ def main() -> None:
 
     # Environment variables (search tools)
     # NOTE: This project stores keys in a local file; keep behavior consistent with subagent_research.py.
-    from rosetta.context.workflow.API import FIRECRAWL_API_KEY, GOOGLE_API_KEY, SEARCH_ENGINE_ID
+    from rosetta.workflow.API import FIRECRAWL_API_KEY, GOOGLE_API_KEY, SEARCH_ENGINE_ID
 
     os.environ["FIRECRAWL_API_KEY"] = FIRECRAWL_API_KEY
     os.environ["GOOGLE_API_KEY"] = GOOGLE_API_KEY

@@ -1,11 +1,18 @@
-"""Test the search_engine tool with ChatAgent."""
+"""Test the search_engine tool with ChatAgent.
+
+To launch the embedding server:
+CUDA_VISIBLE_DEVICES=2 python -m sglang.launch_server --model-path Qwen/Qwen3-Embedding-0.6B --host 0.0.0.0 --port 30001 --is-embedding
+
+To launch the LLM server:
+CUDA_VISIBLE_DEVICES=0,1 python -m sglang.launch_server --model-path Qwen/Qwen3-32B --host 0.0.0.0 --tp-size 2 --tool-call-parser qwen --port 30000
+"""
 
 from camel.agents import ChatAgent
 from camel.models import ModelFactory
 from camel.toolkits import FunctionTool
 from camel.types import ModelPlatformType
 
-from rosetta.context.workflow.retriever import search_engine
+from rosetta.workflow.retriever import search_engine
 
 
 def main():

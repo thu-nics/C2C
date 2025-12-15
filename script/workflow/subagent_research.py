@@ -11,10 +11,10 @@ from camel.models import ModelFactory
 from camel.types import ModelPlatformType
 
 from rosetta.context.track import InteractionTracker
-from rosetta.context.workflow.research_flow import direct_subagent_research, extend_subagent_research
+from rosetta.workflow.research_flow import direct_subagent_research, extend_subagent_research
 
 ### Environment Variables ###
-from rosetta.context.workflow.API import FIRECRAWL_API_KEY, GOOGLE_API_KEY, SEARCH_ENGINE_ID
+from rosetta.workflow.API import FIRECRAWL_API_KEY, GOOGLE_API_KEY, SEARCH_ENGINE_ID
 os.environ["FIRECRAWL_API_KEY"] = FIRECRAWL_API_KEY
 os.environ["GOOGLE_API_KEY"] = GOOGLE_API_KEY
 os.environ["SEARCH_ENGINE_ID"] = SEARCH_ENGINE_ID
