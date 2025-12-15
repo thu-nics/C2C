@@ -23,7 +23,7 @@ from camel.types import ModelPlatformType
 from camel.toolkits import FunctionTool
 
 from rosetta.context.track import InteractionTracker
-from rosetta.workflow.research_flow import direct_subagent_research, extend_subagent_research
+from rosetta.workflow.research_flow import direct_subagent_research, extend_subagent_research, full_subagent_research
 from rosetta.workflow.evaluation import extract_answer, exact_match, load_done_ids
 from rosetta.workflow.retriever import search_engine
 
@@ -61,7 +61,7 @@ def main() -> None:
     parser.add_argument("--model-url", default="http://localhost:30000/v1")
     parser.add_argument("--model-type", default="contextual-model")
     parser.add_argument("--tokenizer", default="Qwen/Qwen3-32B")
-    parser.add_argument("--mode", default="direct", choices=["direct", "extended"])
+    parser.add_argument("--mode", default="direct", choices=["direct", "extend", "full"])
     args = parser.parse_args()  
 
     # Environment variables (search tools)
@@ -142,8 +142,10 @@ def main() -> None:
             try:
                 if args.mode == "direct":
                     research_func = direct_subagent_research
-                elif args.mode == "extended":
+                elif args.mode == "extend":
                     research_func = extend_subagent_research
+                elif args.mode == "full":
+                    research_func = full_subagent_research
                 else:
                     raise ValueError(f"Invalid mode: {args.mode}")
                 pred_raw, tracker = research_func(
@@ -200,7 +202,10 @@ def main() -> None:
         )
 
     acc = (correct / total) if total else 0.0
-    print(f"Done. evaluated={total} EM={correct} acc={acc:.3f} output={out_path}")
+    summary_line = f"evaluated={total} EM={correct} acc={acc:.3f} output={out_path}"
+    summary_path = out_path.parent / "summary.txt"
+    summary_path.write_text(summary_line + "\n", encoding="utf-8")
+    print(f"Done. {summary_line} summary={summary_path}")
 
 
 if __name__ == "__main__":

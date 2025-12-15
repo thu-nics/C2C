@@ -3,11 +3,21 @@
 from typing import List
 
 from camel.messages import BaseMessage
-from camel.memories import MemoryRecord
+from camel.memories import MemoryRecord, ContextRecord
 from camel.types import OpenAIBackendRole, RoleType
 
+def records_to_camel_messages(
+    records: List[ContextRecord]
+) -> List[MemoryRecord]:
+    """Convert ContextRecord list to standard message format.
+    
+    Args:
+        records: List of MemoryRecord objects.
+    """
+    return [ctx_record.memory_record for ctx_record in records]
 
-def convert_to_camel_messages(
+
+def messages_to_camel_messages(
     chat_history: List[dict], 
     skip_system: bool = False
 ) -> List[MemoryRecord]:
@@ -63,6 +73,7 @@ def convert_to_camel_messages(
                 message_list.append(
                     MemoryRecord(
                         message=BaseMessage.make_system_message(
+                            role_name="System",
                             content=content
                         ),
                         role_at_backend=OpenAIBackendRole.SYSTEM
