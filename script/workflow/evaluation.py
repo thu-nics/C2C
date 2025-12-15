@@ -23,7 +23,7 @@ from camel.types import ModelPlatformType
 from camel.toolkits import FunctionTool
 
 from rosetta.context.track import InteractionTracker
-from rosetta.workflow.research_flow import direct_subagent_research
+from rosetta.workflow.research_flow import direct_subagent_research, extend_subagent_research
 from rosetta.workflow.evaluation import extract_answer, exact_match, load_done_ids
 from rosetta.workflow.retriever import search_engine
 
@@ -61,7 +61,8 @@ def main() -> None:
     parser.add_argument("--model-url", default="http://localhost:30000/v1")
     parser.add_argument("--model-type", default="contextual-model")
     parser.add_argument("--tokenizer", default="Qwen/Qwen3-32B")
-    args = parser.parse_args()
+    parser.add_argument("--mode", default="direct", choices=["direct", "extended"])
+    args = parser.parse_args()  
 
     # Environment variables (search tools)
     # NOTE: This project stores keys in a local file; keep behavior consistent with subagent_research.py.
@@ -139,10 +140,16 @@ def main() -> None:
             llm0_messages: Optional[list[dict[str, Any]]] = None
             err: Optional[str] = None
             try:
-                pred_raw, tracker = direct_subagent_research(
+                if args.mode == "direct":
+                    research_func = direct_subagent_research
+                elif args.mode == "extended":
+                    research_func = extend_subagent_research
+                else:
+                    raise ValueError(f"Invalid mode: {args.mode}")
+                pred_raw, tracker = research_func(
                     question=question,
                     main_agent=main_agent,
-                    search_model=model,
+                    search_model=model, 
                     tracker=tracker,
                     search_tool=search_tool
                 )
