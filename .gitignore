@@ -23,3 +23,6 @@ script/analysis/oracle/
 run.sh
 test.py
 script/train/SFT_train_debug.py
+
+# Secrets
+rosetta/context/workflow/API.py

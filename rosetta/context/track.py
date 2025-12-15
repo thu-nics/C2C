@@ -1,0 +1,382 @@
+"""Tracking system for model interactions and content provenance."""
+
+from dataclasses import dataclass, field
+from typing import Optional
+import matplotlib.pyplot as plt
+from transformers import AutoTokenizer
+
+import numpy as np
+
+
+@dataclass
+class ContentElement:
+    """A single element in the content pool."""
+
+    uid: int
+    role: str
+    content: str  # Content used for matching (may be str(tool_calls) if original was empty)
+    original_content: str  # Original content for retrieval
+    tool_calls: Optional[list[dict]] = None
+    tool_call_id: Optional[str] = None
+
+
+class InteractionTracker:
+    """Tracks content pool and model interactions across multiple LLMs.
+
+    Content Pool:
+        - Shared across all LLMs
+        - Each (role, content) tuple is stored with a unique uid (1-indexed)
+
+    Interaction Pool:
+        - Each interaction records: llm_id, response_uid, context_uids
+        - Export produces R×M matrix where R=num_interactions, M=pool_size
+    """
+
+    def __init__(self, tokenizer: Optional[AutoTokenizer] = None):
+        """Initialize tracker.
+
+        Args:
+            tokenizer: Optional HuggingFace tokenizer for apply_chat_template in get_message_text().
+        """
+        self._pool: list[ContentElement] = []
+        self._content_to_uid: dict[tuple[str, str], int] = {}
+        self._interactions: list[tuple[int, int, list[int]]] = []  # (llm_id, response_uid, context_uids)
+        self._tokenizer = tokenizer
+
+    def record(self, messages: list[dict], llm_id: int = 0) -> int:
+        """Record an interaction from a message list.
+
+        Args:
+            messages: List of message dicts with "role", "content", and optionally
+                      "tool_calls", "tool_call_id" keys.
+                      Last message must have role="assistant".
+            llm_id: Identifier for the LLM that generated the response.
+
+        Returns:
+            interaction_id (0-indexed)
+
+        Raises:
+            ValueError: If messages is empty or last message is not from assistant.
+        """
+        if not messages:
+            raise ValueError("messages cannot be empty")
+
+        if messages[-1].get("role") != "assistant":
+            raise ValueError("Last message must be from assistant")
+
+        uids = []
+        for msg in messages:
+            role = msg["role"]
+            content = msg["content"]  # Content for matching (may be str(tool_calls))
+            original_content = msg.get("original_content", content)  # Original content for retrieval
+            key = (role, content)
+
+            if key in self._content_to_uid:
+                uid = self._content_to_uid[key]
+            else:
+                uid = len(self._pool) + 1  # 1-indexed
+                self._pool.append(ContentElement(
+                    uid=uid,
+                    role=role,
+                    content=content,
+                    original_content=original_content,
+                    tool_calls=msg.get("tool_calls"),
+                    tool_call_id=msg.get("tool_call_id"),
+                ))
+                self._content_to_uid[key] = uid
+
+            uids.append(uid)
+
+        response_uid = uids[-1]
+        context_uids = uids[:-1]
+
+        interaction_id = len(self._interactions)
+        self._interactions.append((llm_id, response_uid, context_uids))
+
+        return interaction_id
+
+    def get_pool_size(self) -> int:
+        """Return current pool size M."""
+        return len(self._pool)
+
+    # ANSI color codes for roles
+    _ROLE_COLORS = {
+        "system": "\033[95m",    # Magenta
+        "user": "\033[92m",      # Green
+        "assistant": "\033[94m", # Blue
+        "tool": "\033[93m",      # Yellow
+    }
+    _RESET = "\033[0m"
+
+    def __str__(self) -> str:
+        """Return ASCII visualization of the interaction matrix with colored roles."""
+        num_interactions = len(self._interactions)
+        pool_size = len(self._pool)
+
+        if num_interactions == 0:
+            return "InteractionTracker: No interactions recorded."
+
+        matrix = self.export_context_matrix()
+
+        lines = ["Interaction Context Matrix", "=" * 40]
+
+        # Legend
+        legend_parts = [f"{self._ROLE_COLORS.get(r, '')}{r[0].upper()}{self._RESET}" 
+                        for r in ["system", "user", "assistant", "tool"]]
+        lines.append(f"Legend: {' '.join(legend_parts)} (S=system, U=user, A=assistant, T=tool)")
+        lines.append("")
+
+        # Header with UIDs
+        uid_width = max(3, len(str(pool_size)))
+        label_width = 20
+        header = " " * label_width + "".join(f"{i+1:^{uid_width}}" for i in range(pool_size))
+        lines.append(header)
+        lines.append(" " * label_width + "-" * (pool_size * uid_width))
+
+        # Each interaction row
+        for i, (llm_id, response_uid, _) in enumerate(self._interactions):
+            label = f"I{i} (LLM{llm_id})→R{response_uid}"
+            row_parts = []
+            for j in range(pool_size):
+                uid = j + 1  # 1-indexed
+                if uid == response_uid:
+                    # Response column: blue brackets, no square
+                    row_parts.append(f"{self._ROLE_COLORS['assistant']}[R]{self._RESET}")
+                elif matrix[i, j]:
+                    # Context column: only ■ is colored
+                    role = self._pool[j].role
+                    color = self._ROLE_COLORS.get(role, "")
+                    row_parts.append(f"[{color}■{self._RESET}]")
+                else:
+                    row_parts.append("[ ]")
+            row = "".join(f"{part:^{uid_width}}" for part in row_parts)
+            lines.append(f"{label:<{label_width}}{row}")
+
+        lines.append("=" * 40)
+        lines.append(f"Pool size: {pool_size}, Interactions: {num_interactions}")
+
+        return "\n".join(lines)
+
+    def __repr__(self) -> str:
+        return f"InteractionTracker(pool_size={len(self._pool)}, interactions={len(self._interactions)})"
+
+    def get_messages(self, llm_id: int = 0, response_uid: Optional[int] = None) -> list[dict]:
+        """Get messages for an interaction by LLM ID and response UID.
+
+        Returns messages in HF tokenizer compatible format, including tool_calls
+        and tool_call_id when present.
+
+        Args:
+            llm_id: The LLM identifier.
+            response_uid: The response UID. If None, returns messages for the last response of this LLM.
+
+        Returns:
+            List of message dicts with 'role', 'content', and optionally 'tool_calls', 'tool_call_id'.
+
+        Raises:
+            ValueError: If no matching interaction is found.
+        """
+        context_uids = None
+        target_response_uid = response_uid
+
+        if response_uid is None:
+            # Find last interaction for this LLM
+            for lid, rid, ctx in reversed(self._interactions):
+                if lid == llm_id:
+                    target_response_uid = rid
+                    context_uids = ctx
+                    break
+        else:
+            # Find interaction by response_uid and llm_id
+            for lid, rid, ctx in self._interactions:
+                if lid == llm_id and rid == response_uid:
+                    context_uids = ctx
+                    break
+
+        if context_uids is None:
+            if response_uid is None:
+                raise ValueError(f"No interactions found for llm_id={llm_id}")
+            raise ValueError(f"No interaction found for llm_id={llm_id}, response_uid={response_uid}")
+
+        # Build messages list: context + response
+        all_uids = context_uids + [target_response_uid]
+        messages = []
+        for uid in all_uids:
+            elem = self._pool[uid - 1]
+            msg = {"role": elem.role, "content": elem.original_content}
+            if elem.tool_calls is not None:
+                msg["tool_calls"] = elem.tool_calls
+            if elem.tool_call_id is not None:
+                msg["tool_call_id"] = elem.tool_call_id
+            messages.append(msg)
+
+        return messages
+
+    def get_message_text(self, llm_id: int = 0, response_uid: Optional[int] = None) -> str:
+        """Get messages as formatted text for an interaction.
+
+        If tokenizer was provided at init, uses apply_chat_template.
+        Otherwise, converts messages to a simple text format.
+
+        Args:
+            llm_id: The LLM identifier.
+            response_uid: The response UID. If None, returns text for the last response of this LLM.
+
+        Returns:
+            Formatted text string of the conversation.
+        """
+        messages = self.get_messages(llm_id=llm_id, response_uid=response_uid)
+
+        if self._tokenizer is not None:
+            return self._tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=False,
+            )
+        else:
+            # Simple text format without tokenizer
+            lines = []
+            for msg in messages:
+                role = msg["role"]
+                content = msg["content"]
+                lines.append(f"[{role}]: {content}")
+            return "\n".join(lines)
+
+    def export_context_matrix(self, llm_id: Optional[int] = None) -> np.ndarray:
+        """Export context dependency matrix.
+
+        Args:
+            llm_id: If provided, only export interactions from this LLM.
+                    If None, export all interactions.
+
+        Returns:
+            bool array of shape (num_interactions, pool_size)
+            matrix[i, j] = True if interaction i used element (j+1) as context
+        """
+        pool_size = len(self._pool)
+
+        if llm_id is None:
+            interactions = self._interactions
+        else:
+            interactions = [(lid, rid, ctx) for lid, rid, ctx in self._interactions if lid == llm_id]
+
+        num_interactions = len(interactions)
+        matrix = np.zeros((num_interactions, pool_size), dtype=bool)
+
+        for i, (_, _, context_uids) in enumerate(interactions):
+            for uid in context_uids:
+                matrix[i, uid - 1] = True
+
+        return matrix
+
+    def export_response_uids(self, llm_id: Optional[int] = None) -> list[int]:
+        """Return list of response uids, one per interaction.
+
+        Args:
+            llm_id: If provided, only export from this LLM. If None, export all.
+        """
+        if llm_id is None:
+            return [response_uid for _, response_uid, _ in self._interactions]
+        return [response_uid for lid, response_uid, _ in self._interactions if lid == llm_id]
+
+    def export_llm_ids(self) -> list[int]:
+        """Return list of llm_ids, one per interaction."""
+        return [llm_id for llm_id, _, _ in self._interactions]
+
+    def get_unique_llm_ids(self) -> list[int]:
+        """Return list of unique LLM IDs that have recorded interactions."""
+        return list({llm_id for llm_id, _, _ in self._interactions})
+
+    def plot(self, path: str = "interaction.jpg") -> None:
+        """Plot and save the interaction matrix with each interaction as a subplot.
+
+        Args:
+            path: Output file path. Default: "interaction.jpg"
+        """
+        num_interactions = len(self._interactions)
+        pool_size = len(self._pool)
+
+        if num_interactions == 0:
+            print("No interactions to plot.")
+            return
+
+        matrix = self.export_context_matrix()
+
+        # Create subplots: one row per interaction
+        fig, axes = plt.subplots(
+            num_interactions, 1,
+            figsize=(max(8, pool_size * 0.3), num_interactions * 0.8 + 1),
+            squeeze=False,
+        )
+
+        for i, (llm_id, response_uid, _) in enumerate(self._interactions):
+            ax = axes[i, 0]
+            ax.imshow(matrix[i:i+1, :], cmap="Blues", aspect="auto", vmin=0, vmax=1)
+
+            ax.set_yticks([0])
+            ax.set_yticklabels([f"I{i} (LLM{llm_id})→R{response_uid}"])
+            ax.set_xticks(range(pool_size))
+            ax.set_xticklabels(range(1, pool_size + 1), fontsize=8)
+
+            # Add grid
+            ax.set_xticks(np.arange(-0.5, pool_size, 1), minor=True)
+            ax.grid(which="minor", color="gray", linestyle="-", linewidth=0.5)
+            ax.tick_params(which="minor", size=0)
+
+        axes[-1, 0].set_xlabel("Content Pool UID")
+        fig.suptitle("Interaction Context Matrix", fontsize=12)
+        plt.tight_layout()
+        plt.savefig(path, dpi=150, bbox_inches="tight")
+        plt.close()
+
+        print(f"Saved interaction plot to {path}")
+
+
+def record_interaction(
+    tracker: Optional[InteractionTracker],
+    messages: list[dict],
+    llm_id: int = 0,
+) -> Optional[int]:
+    """Record an interaction if tracker is provided.
+
+    Wrapper function that handles None tracker and normalizes messages.
+    For messages with empty content but 'tool_calls', uses str(tool_calls) as content
+    for deduplication, while preserving original tool_calls for retrieval.
+
+    Args:
+        tracker: InteractionTracker instance or None (no-op if None)
+        messages: List of message dicts with 'role' and 'content' keys
+        llm_id: Identifier for the LLM
+
+    Returns:
+        interaction_id if tracked, None if tracker is None
+    """
+    if tracker is None:
+        return None
+
+    clean_messages = []
+    for msg in messages:
+        role = msg["role"]
+        original_content = msg.get("content", "")
+        content = original_content  # Content for matching
+
+        # If content is empty but tool_calls exists, use tool_calls as content for matching
+        if not content and "tool_calls" in msg:
+            content = str(msg["tool_calls"])
+
+        # Build clean message
+        clean_msg = {
+            "role": role,
+            "content": content,
+            "original_content": original_content,
+        }
+
+        # Preserve original tool fields
+        if "tool_calls" in msg:
+            clean_msg["tool_calls"] = msg["tool_calls"]
+        if "tool_call_id" in msg:
+            clean_msg["tool_call_id"] = msg["tool_call_id"]
+
+        clean_messages.append(clean_msg)
+
+    return tracker.record(clean_messages, llm_id=llm_id)
