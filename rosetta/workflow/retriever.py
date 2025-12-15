@@ -2,29 +2,30 @@
 
 from typing import Any
 
-from camel.storages import QdrantStorage, VectorDBQuery
+from camel.storages import FaissStorage, VectorDBQuery
 
 from rosetta.workflow.embeddings import SGLangEmbedding
 
 # Default configuration
-DB_PATH = "local/data/qdrant_hotpotqa"
+DB_PATH = "local/data/faiss_hotpotqa"
 COLLECTION_NAME = "hotpotqa_articles"
 
 # Lazy-loaded globals
 _embedding: SGLangEmbedding | None = None
-_storage: QdrantStorage | None = None
+_storage: FaissStorage | None = None
 
 
-def _get_components() -> tuple[SGLangEmbedding, QdrantStorage]:
+def _get_components() -> tuple[SGLangEmbedding, FaissStorage]:
     """Lazy initialization of embedding and storage."""
     global _embedding, _storage
     if _embedding is None:
         _embedding = SGLangEmbedding()
     if _storage is None:
-        _storage = QdrantStorage(
+        _storage = FaissStorage(
             vector_dim=_embedding.get_output_dim(),
-            path=DB_PATH,
+            storage_path=DB_PATH,
             collection_name=COLLECTION_NAME,
+            index_type="IVFFlat",  # Faster search for large datasets
         )
     return _embedding, _storage
 

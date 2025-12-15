@@ -9,9 +9,11 @@ from transformers import AutoTokenizer
 from camel.agents import ChatAgent
 from camel.models import ModelFactory
 from camel.types import ModelPlatformType
+from camel.toolkits import FunctionTool
 
 from rosetta.context.track import InteractionTracker
 from rosetta.workflow.research_flow import direct_subagent_research, extend_subagent_research
+from rosetta.workflow.retriever import search_engine
 
 ### Environment Variables ###
 from rosetta.workflow.API import FIRECRAWL_API_KEY, GOOGLE_API_KEY, SEARCH_ENGINE_ID
@@ -39,12 +41,15 @@ if __name__ == "__main__":
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-32B")
     tracker = InteractionTracker(tokenizer=tokenizer)
 
-    # response, tracker = direct_subagent_research(
-    response, tracker = extend_subagent_research(
-        question="Which magazine was started first Arthur's Magazine or First for Women?", 
+    search_tool = FunctionTool(search_engine)
+
+    response, tracker = direct_subagent_research(
+    # response, tracker = extend_subagent_research(
+        question="Were Scott Derrickson and Ed Wood of the same nationality?", 
         main_agent=main_agent, 
         search_model=model,
-        tracker=tracker
+        tracker=tracker,
+        search_tool=search_tool
     )
 
     # Print the tracker

@@ -3,23 +3,24 @@
 from datasets import load_dataset
 from tqdm import tqdm
 
-from camel.storages import QdrantStorage, VectorDBQuery, VectorRecord
+from camel.storages import FaissStorage, VectorDBQuery, VectorRecord
 
 from rosetta.workflow.embeddings import SGLangEmbedding
 
 # Configuration
-DB_PATH = "local/data/qdrant_hotpotqa"
+DB_PATH = "local/data/faiss_hotpotqa"
 COLLECTION_NAME = "hotpotqa_articles"
-BATCH_SIZE = 128
+BATCH_SIZE = 2048
 
 
 def main():
     # Setup embedding and storage
     embedding = SGLangEmbedding()
-    storage = QdrantStorage(
+    storage = FaissStorage(
         vector_dim=embedding.get_output_dim(),
-        path=DB_PATH,
+        storage_path=DB_PATH,
         collection_name=COLLECTION_NAME,
+        index_type="IVFFlat",  # Faster search for large datasets
     )
 
     # Load HotpotQA validation set
