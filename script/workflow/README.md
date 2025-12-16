@@ -26,6 +26,18 @@ CUDA_VISIBLE_DEVICES=2 python -m sglang.launch_server \
     --is-embedding
 ```
 
+alternatively:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 python -m sglang.launch_server \
+    --model-path Qwen/Qwen3-Embedding-0.6B \
+    --host 0.0.0.0 \
+    --port 30001 \
+    --is-embedding \
+    --tp-size 2 \
+    --mem-fraction-static 0.2
+```
+
 ### 2. Launch LLM Server (for agents)
 
 ```bash
