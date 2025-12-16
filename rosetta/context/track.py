@@ -5,6 +5,8 @@ from typing import Optional
 import matplotlib.pyplot as plt
 from transformers import AutoTokenizer
 
+import warnings
+
 import numpy as np
 
 
@@ -41,6 +43,7 @@ class InteractionTracker:
         self._pool: list[ContentElement] = []
         self._content_to_uid: dict[tuple[str, str], int] = {}
         self._interactions: list[tuple[int, int, list[int]]] = []  # (llm_id, response_uid, context_uids)
+        self._edges: set[tuple[int, int]] = set()  # (from_uid, to_uid) for dependency graph
         self._tokenizer = tokenizer
 
     def record(self, messages: list[dict], llm_id: int = 0) -> int:
@@ -90,6 +93,10 @@ class InteractionTracker:
         response_uid = uids[-1]
         context_uids = uids[:-1]
 
+        # Add edges for dependency graph (sequential order: A→B, B→C, C→D)
+        for i in range(len(uids) - 1):
+            self._edges.add((uids[i], uids[i + 1]))
+
         interaction_id = len(self._interactions)
         self._interactions.append((llm_id, response_uid, context_uids))
 
@@ -98,6 +105,42 @@ class InteractionTracker:
     def get_pool_size(self) -> int:
         """Return current pool size M."""
         return len(self._pool)
+
+    def _compute_tids(self) -> Optional[dict[int, int]]:
+        """Compute topological order (uid -> tid) using Kahn's algorithm.
+
+        Returns:
+            dict mapping uid to tid, or None if cycle detected.
+        """
+        pool_size = len(self._pool)
+        if pool_size == 0:
+            return {}
+
+        # Build in-degree and adjacency list
+        in_degree = {uid: 0 for uid in range(1, pool_size + 1)}
+        adj = {uid: [] for uid in range(1, pool_size + 1)}
+        for from_uid, to_uid in self._edges:
+            adj[from_uid].append(to_uid)
+            in_degree[to_uid] += 1
+
+        # Kahn's algorithm
+        queue = [uid for uid, deg in in_degree.items() if deg == 0]
+        uid_to_tid = {}
+        tid = 1
+        while queue:
+            # Sort for deterministic order among nodes with same in-degree
+            queue.sort()
+            uid = queue.pop(0)
+            uid_to_tid[uid] = tid
+            tid += 1
+            for neighbor in adj[uid]:
+                in_degree[neighbor] -= 1
+                if in_degree[neighbor] == 0:
+                    queue.append(neighbor)
+
+        if len(uid_to_tid) != pool_size:
+            return None  # Cycle detected
+        return uid_to_tid
 
     # ANSI color codes for roles
     _ROLE_COLORS = {
@@ -109,16 +152,28 @@ class InteractionTracker:
     _RESET = "\033[0m"
 
     def __str__(self) -> str:
-        """Return ASCII visualization of the interaction matrix with colored roles."""
+        """Return ASCII visualization of the interaction matrix with colored roles.
+        
+        Columns are ordered by topological order (tid). If a cycle is detected,
+        warns and falls back to uid order.
+        """
         num_interactions = len(self._interactions)
         pool_size = len(self._pool)
 
         if num_interactions == 0:
             return "InteractionTracker: No interactions recorded."
 
+        # Compute topological order
+        uid_to_tid = self._compute_tids()
+        if uid_to_tid is None:
+            warnings.warn("Cycle detected in dependency graph, falling back to uid order")
+            uid_to_tid = {uid: uid for uid in range(1, pool_size + 1)}  # fallback: tid = uid
+        
+        uid_order = sorted(range(1, pool_size + 1), key=lambda u: uid_to_tid[u])
+
         matrix = self.export_context_matrix()
 
-        lines = ["Interaction Context Matrix", "=" * 40]
+        lines = ["Interaction Context Matrix (ordered by tid)", "=" * 40]
 
         # Legend
         legend_parts = [f"{self._ROLE_COLORS.get(r, '')}{r[0].upper()}{self._RESET}" 
@@ -126,30 +181,29 @@ class InteractionTracker:
         lines.append(f"Legend: {' '.join(legend_parts)} (S=system, U=user, A=assistant, T=tool)")
         lines.append("")
 
-        # Header with UIDs
-        uid_width = max(3, len(str(pool_size)))
+        # Header with tids in topological order
+        tid_width = max(3, len(str(pool_size)))
         label_width = 20
-        header = " " * label_width + "".join(f"{i+1:^{uid_width}}" for i in range(pool_size))
+        header = " " * label_width + "".join(f"{uid_to_tid[uid]:^{tid_width}}" for uid in uid_order)
         lines.append(header)
-        lines.append(" " * label_width + "-" * (pool_size * uid_width))
+        lines.append(" " * label_width + "-" * (pool_size * tid_width))
 
         # Each interaction row
         for i, (llm_id, response_uid, _) in enumerate(self._interactions):
-            label = f"I{i} (LLM{llm_id})→R{response_uid}"
+            response_tid = uid_to_tid[response_uid]
+            label = f"I{i} (LLM{llm_id})→T{response_tid}"
             row_parts = []
-            for j in range(pool_size):
-                uid = j + 1  # 1-indexed
+            for uid in uid_order:
+                j = uid - 1  # 0-indexed for matrix/pool access
                 if uid == response_uid:
-                    # Response column: blue brackets, no square
                     row_parts.append(f"{self._ROLE_COLORS['assistant']}[R]{self._RESET}")
                 elif matrix[i, j]:
-                    # Context column: only ■ is colored
                     role = self._pool[j].role
                     color = self._ROLE_COLORS.get(role, "")
                     row_parts.append(f"[{color}■{self._RESET}]")
                 else:
                     row_parts.append("[ ]")
-            row = "".join(f"{part:^{uid_width}}" for part in row_parts)
+            row = "".join(f"{part:^{tid_width}}" for part in row_parts)
             lines.append(f"{label:<{label_width}}{row}")
 
         lines.append("=" * 40)
