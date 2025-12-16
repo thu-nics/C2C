@@ -8,8 +8,10 @@ from camel.tasks import Task
 from camel.types import OpenAIBackendRole
 
 from rosetta.context.track import InteractionTracker, record_interaction
-from rosetta.workflow.prompt import SEARCH_TASK_DECOMPOSE_PROMPT, RESPONSE_PROMPT_DIRECT, SEARCH_AGENT_PROMPT
-from rosetta.workflow.camel_utils import messages_to_camel_messages, records_to_camel_messages
+from rosetta.workflow.prompt import (
+    SEARCH_TASK_DECOMPOSE_PROMPT, SEARCH_AGENT_PROMPT, RESPONSE_PROMPT_DIRECT
+)
+from rosetta.workflow.camel_utils import messages_to_camel_messages, context_records_to_memory_records, MemoryRecord_flip_role
 
 def direct_subagent_research(
     question: str,
@@ -184,7 +186,7 @@ def extend_sequential_subagent_research(
         record_interaction(tracker, search_agent.chat_history, llm_id=i + 1)
 
         # Record search agent camel history
-        camel_history.append(records_to_camel_messages(search_agent.memory.retrieve()))
+        camel_history.append(context_records_to_memory_records(search_agent.memory.retrieve()))
 
 
     # Direct reply
@@ -251,7 +253,7 @@ def full_subagent_research(
         record_interaction(tracker, search_agent.chat_history, llm_id=i + 1)
 
         # Record search agent camel history
-        camel_history.append(records_to_camel_messages(search_agent.memory.retrieve()))
+        camel_history.append(context_records_to_memory_records(search_agent.memory.retrieve()))
 
     # Expand the context from the search agent's chat history
     for camel_messages in camel_history:

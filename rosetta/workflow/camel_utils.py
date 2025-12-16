@@ -6,7 +6,7 @@ from camel.messages import BaseMessage
 from camel.memories import MemoryRecord, ContextRecord
 from camel.types import OpenAIBackendRole, RoleType
 
-def records_to_camel_messages(
+def context_records_to_memory_records(
     records: List[ContextRecord]
 ) -> List[MemoryRecord]:
     """Convert ContextRecord list to standard message format.
@@ -16,6 +16,21 @@ def records_to_camel_messages(
     """
     return [ctx_record.memory_record for ctx_record in records]
 
+def MemoryRecord_flip_role(message: MemoryRecord) -> MemoryRecord:
+    """Flip the role of a message."""
+    if message.message.role_type == RoleType.USER:
+        message.message.role_type = RoleType.ASSISTANT
+    elif message.message.role_type == RoleType.ASSISTANT:
+        message.message.role_type = RoleType.USER
+    elif message.message.role_type == RoleType.SYSTEM:
+        message.message.role_type = RoleType.SYSTEM
+    elif message.message.role_type == RoleType.FUNCTION:
+        message.message.role_type = RoleType.FUNCTION
+    elif message.message.role_type == RoleType.TOOL:
+        message.message.role_type = RoleType.TOOL
+    else:
+        raise ValueError(f"Unsupported role type: {message.message.role_type}.")
+    return message
 
 def messages_to_camel_messages(
     chat_history: List[dict], 

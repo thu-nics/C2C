@@ -23,6 +23,7 @@ from camel.types import ModelPlatformType
 from camel.toolkits import FunctionTool
 
 from rosetta.context.track import InteractionTracker
+from rosetta.workflow.oneflow import do_research
 from rosetta.workflow.research_flow import direct_subagent_research, extend_subagent_research, full_subagent_research, extend_sequential_subagent_research
 from rosetta.workflow.evaluation import extract_answer, exact_match, load_done_ids
 from rosetta.workflow.retriever import search_engine
@@ -98,7 +99,7 @@ def main() -> None:
     parser.add_argument("--model-url", default="http://localhost:30000/v1")
     parser.add_argument("--model-type", default="contextual-model")
     parser.add_argument("--tokenizer", default="Qwen/Qwen3-32B")
-    parser.add_argument("--mode", default="direct", choices=["direct", "extend", "full", "extend_sequential"])
+    parser.add_argument("--mode", default="direct", choices=["direct", "extend", "full", "extend_sequential", "oneflow"])
     args = parser.parse_args()  
 
     # Environment variables (search tools)
@@ -183,6 +184,8 @@ def main() -> None:
                     research_func = full_subagent_research
                 elif args.mode == "extend_sequential":
                     research_func = extend_sequential_subagent_research
+                elif args.mode == "oneflow":
+                    research_func = do_research
                 else:
                     raise ValueError(f"Invalid mode: {args.mode}")
                 pred_raw, tracker = research_func(
@@ -190,7 +193,8 @@ def main() -> None:
                     main_agent=main_agent,
                     search_model=model, 
                     tracker=tracker,
-                    search_tool=search_tool
+                    search_tool=search_tool,
+                    **({"show_status": False} if args.mode == "oneflow" else {}),
                 )
                 extracted = extract_answer(pred_raw)
                 pred = extracted if extracted is not None else pred_raw.strip()
