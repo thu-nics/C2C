@@ -15,28 +15,22 @@ Ensure that the task plan is created without asking any questions.
 Be specific and clear.
 """
 
-TASK_REVISE_PROMPT = """As a Task Reviser Agent, your objective is to update the task list based on the search result provided above.
+TASK_REVISE_PROMPT = """Revise the task list based on the search result above.
 
 Original question: {question}
 
-Based on the search result, you should:
-- Remove tasks that have been completed successfully.
-- Modify or simplify tasks that failed or returned insufficient information.
-- Provide the final answer if you have gathered enough information.
+Guidelines:
+- Build on previous findings. If candidates were found, verify them against remaining criteria.
+- If a subtask failed, try a different approach (e.g., search for specific candidate + criterion).
+- Provide the final answer when you have enough information.
 
-If tasks remain, output the revised list within <tasks> tags:
+Output revised tasks:
 <tasks>
 <task>Revised subtask 1</task>
-<task>Revised subtask 2</task>
 </tasks>
 
-If you can answer the original question, output within <answer> tags:
+Or output the answer:
 <answer>{{"justification":"1-2 short sentences", "answer":"final answer span"}}</answer>
-
-Constraints:
-- Each subtask should be concise, concrete, and achievable.
-- For yes/no questions, answer must be exactly "Yes" or "No".
-- Do not include any extra text outside the tags.
 """
 
 FORCE_ANSWER_PROMPT = """Answer the question based on collected information.
