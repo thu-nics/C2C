@@ -9,7 +9,7 @@ from transformers import AutoTokenizer
 from camel.agents import ChatAgent
 from camel.models import ModelFactory
 from camel.types import ModelPlatformType
-from camel.toolkits import FunctionTool
+from camel.toolkits import FunctionTool, SearchToolkit
 
 from rosetta.context.track import InteractionTracker
 from rosetta.workflow.research_flow import direct_subagent_research, extend_subagent_research, extend_sequential_subagent_research, full_subagent_research
@@ -43,6 +43,7 @@ if __name__ == "__main__":
     tracker = InteractionTracker(tokenizer=tokenizer)
 
     search_tool = FunctionTool(search_engine)
+    # search_tool = FunctionTool(SearchToolkit().search_google)
 
     # response, tracker = direct_subagent_research(
     # response, tracker = extend_subagent_research(
@@ -50,8 +51,8 @@ if __name__ == "__main__":
     # response, tracker = full_subagent_research(
     response, tracker = do_research(
         # question="Were Scott Derrickson and Ed Wood of the same nationality?", 
-        # question="What science fantasy young adult series, told in first person, has a set of companion books narrating the stories of enslaved worlds and alien species?", # answer: Animorphs
-        question="Which performance act has a higher instrument to person ratio, Badly Drawn Boy or Wolf Alice?",
+        question="What science fantasy young adult series, told in first person, has a set of companion books narrating the stories of enslaved worlds and alien species?", # answer: Animorphs
+        # question="Which performance act has a higher instrument to person ratio, Badly Drawn Boy or Wolf Alice?",
         main_agent=main_agent, 
         search_model=model,
         tracker=tracker,

@@ -7,11 +7,11 @@ from camel.agents import ChatAgent
 from camel.models import BaseModelBackend
 from camel.toolkits import FunctionTool, SearchToolkit
 from camel.memories import ContextRecord, MemoryRecord
+from camel.types import OpenAIBackendRole
 
 from rosetta.context.track import InteractionTracker, record_interaction
 from rosetta.workflow.prompt import SEARCH_TASK_DECOMPOSE_PROMPT, TASK_REVISE_PROMPT, FORCE_ANSWER_PROMPT, SEARCH_AGENT_PROMPT
 from rosetta.workflow.camel_utils import context_records_to_memory_records, MemoryRecord_flip_role
-
 
 class StatusLogger:
     """Handles console status display with spinner and history."""
@@ -19,13 +19,23 @@ class StatusLogger:
     def __init__(self, enabled: bool = True):
         self.console = Console() if enabled else None
 
+    def _format_tasks(self, round_idx: int, tasks: list) -> str:
+        """Format all tasks with current highlighted. Numbering starts from round_idx."""
+        lines = [f"Round {round_idx} | Tasks: {len(tasks)}"]
+        for i, task in enumerate(tasks):
+            prefix = "  → " if i == 0 else "    "
+            lines.append(f"{prefix}[{round_idx + i}] {task}")
+        return "\n".join(lines)
+
     @contextmanager
-    def task(self, msg: str):
-        """Context manager: show spinner during execution, print ✓ after."""
+    def round(self, round_idx: int, tasks: list):
+        """Context manager: show spinner with all tasks, print ✓ with current task after."""
+        status_msg = self._format_tasks(round_idx, tasks)
+        done_msg = f"Round {round_idx} | Tasks: {len(tasks)} | {tasks[0]}"
         if self.console:
-            with self.console.status(msg):
+            with self.console.status(status_msg):
                 yield
-            self.console.print(f"[green]✓[/green] {msg}", highlight=False)
+            self.console.print(f"[green]✓[/green] {done_msg}", highlight=False)
         else:
             yield
 
@@ -85,6 +95,21 @@ class ContextSelector:
         indices = [i for i, uid in enumerate(message_uids) if uid in search_only_uids]
         return [records[i] for i in indices]
 
+    @staticmethod
+    def filter_shared(records, messages, tracker, llm_id):
+        """Keep UIDs shared between LLM 0 and at least one other LLM (union of intersections)."""
+        message_uids = tracker.messages_to_uids(messages)
+        main_uids = set(tracker.get_uids(llm_id=0))
+        other_llm_ids = [lid for lid in tracker.get_unique_llm_ids() if lid != 0]
+        if not other_llm_ids:
+            return records
+        # Union of (main ∩ each_search_agent)
+        shared_uids = set()
+        for lid in other_llm_ids:
+            shared_uids |= main_uids & set(tracker.get_uids(llm_id=lid))
+        indices = [i for i, uid in enumerate(message_uids) if uid in shared_uids]
+        return [records[i] for i in indices]
+
     # --- Example select functions ---
     @staticmethod
     def select_all(records):
@@ -93,8 +118,8 @@ class ContextSelector:
 
     @staticmethod
     def select_skip_system(records):
-        """Skip system message: records[1:]"""
-        return records[1:]
+        """Skip system messages by filtering on role."""
+        return [r for r in records if r.role_at_backend != OpenAIBackendRole.SYSTEM]
 
     @staticmethod
     def select_query_response(records):
@@ -119,6 +144,10 @@ main_to_search_selector = ContextSelector(
     filter_fn=None,
     select_fn=ContextSelector.select_none
 )
+# main_to_search_selector = ContextSelector(
+#     filter_fn=ContextSelector.filter_shared,
+#     select_fn=ContextSelector.select_skip_system
+# )
 
 def do_research(
     question: str,
@@ -164,7 +193,7 @@ def do_research(
             break
         
         # Execute round with status display
-        with logger.task(f"Round {round_idx+1} | Tasks: {len(tasks)} | {tasks[0]}"):
+        with logger.round(round_idx + 1, tasks):
             search_agent = ChatAgent(system_message=SEARCH_AGENT_PROMPT, model=search_model, tools=[search_tool])
             
             # Forward context to search agent
