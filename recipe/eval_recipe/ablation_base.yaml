@@ -20,7 +20,7 @@ model:
   model_name: Rosetta
   rosetta_config:
     alignment_strategy: longest
-    base_model: /share/public/public_models/Qwen3-0.6B
+    base_model: Qwen/Qwen3-0.6B
     checkpoints_dir: local/checkpoints/ablation_study_general/level_0/final
     is_do_alignment: false
     teacher_model: Qwen/Qwen2.5-0.5B-Instruct

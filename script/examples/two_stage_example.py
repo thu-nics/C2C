@@ -9,7 +9,7 @@ def example_standalone():
     """Example of standalone usage."""
     # Initialize the two-stage pipeline
     pipeline = TwoStageInference(
-        context_model_path="/share/public/public_models/Qwen3-4B",  # e.g., "Qwen/Qwen2.5-7B-Instruct"
+        context_model_path="Qwen/Qwen3-4B",  # e.g., "Qwen/Qwen2.5-7B-Instruct"
         answer_model_path="Qwen/Qwen3-0.6B",    # e.g., "Qwen/Qwen2.5-72B-Instruct"
         device="cuda",
         max_new_tokens=512,

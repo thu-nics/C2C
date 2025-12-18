@@ -6,7 +6,7 @@
 echo "🚀 Starting dataset generation..."
 
 python script/dataset/create/create_mmlu.py \
-    --model_path "/share/public/public_models/Qwen3-4B" \
+    --model_path "Qwen/Qwen3-4B" \
     --api_url "http://localhost:30000/v1" \
     --dataset_path "cais/mmlu" \
     --output_dir "local/teacher_datasets/mmlu_4b_output_150_words" \

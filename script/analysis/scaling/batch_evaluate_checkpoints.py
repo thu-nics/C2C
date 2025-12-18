@@ -37,19 +37,19 @@ class BatchCheckpointEvaluator:
         
         # 模型家族定义（与auto_scaling_experiment.py保持一致）
         self.family1 = {
-            "tiny": "/share/public/public_models/Qwen3-0.6B",
-            "small": "/share/public/public_models/Qwen3-1.7B",
-            "medium": "/share/public/public_models/Qwen3-4B",
-            "large": "/share/public/public_models/Qwen3-8B",
-            "xlarge": "/share/public/public_models/Qwen3-14B"
+            "tiny": "Qwen/Qwen3-0.6B",
+            "small": "Qwen/Qwen3-1.7B",
+            "medium": "Qwen/Qwen3-4B",
+            "large": "Qwen/Qwen3-8B",
+            "xlarge": "Qwen/Qwen3-14B"
         }
         
         self.family2 = {
-            "tiny": "/share/public/public_models/Qwen2.5-0.5B-Instruct",
-            "small": "/share/public/public_models/Qwen2.5-1.5B-Instruct",
-            "medium": "/share/public/public_models/Qwen2.5-3B-Instruct",
-            "large": "/share/public/public_models/Qwen2.5-7B-Instruct",
-            "xlarge": "/share/public/public_models/Qwen2.5-14B-Instruct"
+            "tiny": "Qwen/Qwen2.5-0.5B-Instruct",
+            "small": "Qwen/Qwen2.5-1.5B-Instruct",
+            "medium": "Qwen/Qwen2.5-3B-Instruct",
+            "large": "Qwen/Qwen2.5-7B-Instruct",
+            "xlarge": "Qwen/Qwen2.5-14B-Instruct"
         }
         
         # 尺寸映射
