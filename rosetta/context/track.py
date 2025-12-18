@@ -47,6 +47,7 @@ class InteractionTracker:
         self._edges: set[tuple[int, int]] = set()  # (from_uid, to_uid) for dependency graph
         self._tokenizer = tokenizer
         self._concise_str = concise_str
+        self._llm_tools: dict[int, list] = {}  # llm_id -> tools list
 
     def record(self, messages: list[dict], llm_id: int = 0) -> int:
         """Record an interaction from a message list.
@@ -107,6 +108,35 @@ class InteractionTracker:
     def get_pool_size(self) -> int:
         """Return current pool size M."""
         return len(self._pool)
+
+    def register_tools(self, llm_id: int, tools: list) -> None:
+        """Register tools for a specific LLM.
+
+        Converts FunctionTool objects to OpenAI tool schemas at registration time.
+
+        Args:
+            llm_id: The LLM identifier.
+            tools: List of tools (FunctionTool objects or dicts) available to this LLM.
+        """
+        # Convert FunctionTool objects to schemas immediately
+        tool_schemas = []
+        for tool in tools:
+            if hasattr(tool, 'get_openai_tool_schema'):
+                tool_schemas.append(tool.get_openai_tool_schema())
+            else:
+                tool_schemas.append(tool)
+        self._llm_tools[llm_id] = tool_schemas
+
+    def get_tools(self, llm_id: int) -> Optional[list]:
+        """Get registered tool schemas for a specific LLM.
+
+        Args:
+            llm_id: The LLM identifier.
+
+        Returns:
+            List of tool schemas if registered, None otherwise.
+        """
+        return self._llm_tools.get(llm_id)
 
     def _compute_tids(self) -> Optional[dict[int, int]]:
         """Compute topological order (uid -> tid) using Kahn's algorithm.
@@ -370,6 +400,7 @@ class InteractionTracker:
 
         If tokenizer was provided at init, uses apply_chat_template.
         Otherwise, converts messages to a simple text format.
+        If tools were registered for this llm_id, they are included in the template.
 
         Args:
             llm_id: The LLM identifier.
@@ -381,10 +412,15 @@ class InteractionTracker:
         messages = self.get_messages(llm_id=llm_id, response_uid=response_uid)
 
         if self._tokenizer is not None:
+            template_kwargs = {}
+            tool_schemas = self._llm_tools.get(llm_id)
+            if tool_schemas:
+                template_kwargs["tools"] = tool_schemas
             return self._tokenizer.apply_chat_template(
                 messages,
                 tokenize=False,
                 add_generation_prompt=False,
+                **template_kwargs,
             )
         else:
             # Simple text format without tokenizer

@@ -10,6 +10,7 @@ from camel.memories import ContextRecord, MemoryRecord
 from camel.types import OpenAIBackendRole
 
 from rosetta.context.track import InteractionTracker, record_interaction
+from rosetta.context.selector import ContextSelector
 from rosetta.workflow.prompt import SEARCH_TASK_DECOMPOSE_PROMPT, TASK_REVISE_PROMPT, FORCE_ANSWER_PROMPT, SEARCH_AGENT_PROMPT
 from rosetta.workflow.camel_utils import context_records_to_memory_records, MemoryRecord_flip_role
 
@@ -49,105 +50,38 @@ def _parse_answer(text: str) -> str:
     match = re.search(r'<answer>(.*?)</answer>', text, re.DOTALL)
     return match.group(1).strip() if match else None
 
-class ContextSelector:
-    """Selects context records to share between agents.
+def _compute_drop_messages(forward_records: list, contextual_selector: ContextSelector, offset: int) -> dict:
+    """Compute drop_messages based on contextual selector.
     
     Args:
-        filter_fn: (records, messages, tracker, llm_id) -> filtered_records
-        select_fn: (memory_records) -> selected_records
+        forward_records: Records forwarded to the target agent.
+        contextual_selector: Selector that determines what to KEEP (drop = complement).
+        offset: Index offset in target context (e.g., 1 for system prompt).
     
-    Example filter_fn and select_fn are provided as static methods.
+    Returns:
+        drop_messages dict: {last_msg_index: [drop_indices]}
     """
+    if not forward_records or not contextual_selector or not contextual_selector.select_fn:
+        return {}
     
-    def __init__(self, filter_fn=None, select_fn=None):
-        self.filter_fn = filter_fn
-        self.select_fn = select_fn
+    # Get indices to KEEP from forwarded records
+    _, keep_indices = contextual_selector.select_fn(forward_records)
+    keep_set = set(keep_indices)
+    
+    # Compute indices to DROP (complement of keep)
+    drop_indices_in_forward = [i for i in range(len(forward_records)) if i not in keep_set]
+    
+    if not drop_indices_in_forward:
+        return {}
+    
+    # Map to target context indices (offset for system prompt, etc.)
+    drop_indices_in_target = [offset + i for i in drop_indices_in_forward]
+    
+    # drop_at = last message index = offset + len(forward) (task message index)
+    drop_at = offset + len(forward_records)
+    
+    return {drop_at: drop_indices_in_target}
 
-    def select(self, context_records: list[ContextRecord], messages: list[dict], 
-               tracker: InteractionTracker, llm_id: int) -> Tuple[list[MemoryRecord], str]:
-        """Apply filter and selection, return (records, content)."""
-        if self.filter_fn:
-            context_records = self.filter_fn(context_records, messages, tracker, llm_id)
-        
-        memory_records = context_records_to_memory_records(context_records)
-        
-        if len(memory_records) < 2:
-            content = memory_records[-1].message.content if memory_records else ""
-            return memory_records, content
-        
-        records = self.select_fn(memory_records) if self.select_fn else memory_records
-        content = memory_records[-1].message.content
-        return records, content
-
-    # --- Example filter functions ---
-    @staticmethod
-    def filter_none(records, messages, tracker, llm_id):
-        """No filtering, keep all records."""
-        return records
-
-    @staticmethod
-    def filter_search_only(records, messages, tracker, llm_id):
-        """Keep only UIDs unique to this agent (not in main agent)."""
-        message_uids = tracker.messages_to_uids(messages)
-        main_uids = set(tracker.get_uids(llm_id=0))
-        search_uids = set(tracker.get_uids(llm_id=llm_id))
-        search_only_uids = search_uids - main_uids
-        indices = [i for i, uid in enumerate(message_uids) if uid in search_only_uids]
-        return [records[i] for i in indices]
-
-    @staticmethod
-    def filter_shared(records, messages, tracker, llm_id):
-        """Keep UIDs shared between LLM 0 and at least one other LLM (union of intersections)."""
-        message_uids = tracker.messages_to_uids(messages)
-        main_uids = set(tracker.get_uids(llm_id=0))
-        other_llm_ids = [lid for lid in tracker.get_unique_llm_ids() if lid != 0]
-        if not other_llm_ids:
-            return records
-        # Union of (main ∩ each_search_agent)
-        shared_uids = set()
-        for lid in other_llm_ids:
-            shared_uids |= main_uids & set(tracker.get_uids(llm_id=lid))
-        indices = [i for i, uid in enumerate(message_uids) if uid in shared_uids]
-        return [records[i] for i in indices]
-
-    # --- Example select functions ---
-    @staticmethod
-    def select_all(records):
-        """Keep all records."""
-        return records
-
-    @staticmethod
-    def select_skip_system(records):
-        """Skip system messages by filtering on role."""
-        return [r for r in records if r.role_at_backend != OpenAIBackendRole.SYSTEM]
-
-    @staticmethod
-    def select_query_response(records):
-        """Keep query and final response: [records[1], records[-1]]"""
-        return [records[1], records[-1]]
-
-    @staticmethod
-    def select_none(records):
-        """Keep none: []"""
-        return []
-
-# Pre-configured selectors
-search_to_main_selector = ContextSelector(
-    filter_fn=ContextSelector.filter_search_only,
-    select_fn=ContextSelector.select_query_response
-)
-# main_to_search_selector = ContextSelector(
-#     filter_fn=None,
-#     select_fn=ContextSelector.select_skip_system
-# )
-main_to_search_selector = ContextSelector(
-    filter_fn=None,
-    select_fn=ContextSelector.select_none
-)
-# main_to_search_selector = ContextSelector(
-#     filter_fn=ContextSelector.filter_shared,
-#     select_fn=ContextSelector.select_skip_system
-# )
 
 def do_research(
     question: str,
@@ -155,6 +89,7 @@ def do_research(
     search_model: BaseModelBackend,
     tracker: InteractionTracker = None,
     search_tool: FunctionTool = None,
+    context_plan: dict = None,
     max_rounds: int = 10,
     show_status: bool = True,
 ) -> Tuple[str, Optional[InteractionTracker]]:
@@ -166,6 +101,11 @@ def do_research(
         search_model: The search model.
         tracker: The tracker.
         search_tool: The search tool. default is Google search.
+        context_plan: Dict with selectors:
+            - 'search_to_main_selector': What memory from search goes to main.
+            - 'main_to_search_selector': What memory from main goes to search.
+            - 'search_contextual': What search model attends to (select_fn returns KEEP indices).
+            - 'main_contextual': What main model attends to (select_fn returns KEEP indices).
         max_rounds: Maximum iterations. default is 10.
         show_status: Show spinner status. Disable when using with tqdm.
 
@@ -175,6 +115,22 @@ def do_research(
     logger = StatusLogger(enabled=show_status)
     if search_tool is None:
         search_tool = FunctionTool(SearchToolkit().search_google)
+    
+    # Setup context selectors
+    if context_plan is None:
+        context_plan = {}
+    search_to_main_selector: ContextSelector = context_plan.get('search_to_main_selector', ContextSelector(
+        filter_fn=ContextSelector.filter_search_only,
+        select_fn=ContextSelector.select_query_response
+    ))
+    main_to_search_selector: ContextSelector = context_plan.get('main_to_search_selector', ContextSelector(
+        filter_fn=None,
+        select_fn=ContextSelector.select_skip_system
+    ))
+    
+    # Contextual selectors (for attention dropping)
+    search_contextual: ContextSelector = context_plan.get('search_contextual')
+    main_contextual: ContextSelector = context_plan.get('main_contextual')
 
     # Initial decomposition
     response = main_agent.step(SEARCH_TASK_DECOMPOSE_PROMPT.format(content=question))
@@ -196,20 +152,51 @@ def do_research(
         with logger.round(round_idx + 1, tasks):
             search_agent = ChatAgent(system_message=SEARCH_AGENT_PROMPT, model=search_model, tools=[search_tool])
             
+            # Register tools for this search agent
+            if tracker is not None:
+                tracker.register_tools(llm_id=round_idx + 1, tools=[search_tool])
+            
             # Forward context to search agent
-            forward_context, _ = main_to_search_selector.select(
+            forward_context, _, _ = main_to_search_selector.select(
                 main_agent.memory.retrieve(), main_agent.chat_history, tracker, round_idx + 1
             )
             search_agent.memory.write_records(forward_context)
+            
+            # Compute drop_messages for search model (drop from main context)
+            # Search context: [0:sys, 1:fwd1, ..., N:fwdN, N+1:task]
+            # Offset = 1 (system prompt at index 0)
+            if search_contextual:
+                drop_msgs = _compute_drop_messages(forward_context, search_contextual, offset=1)
+                if "extra_body" not in search_model.model_config_dict:
+                    search_model.model_config_dict["extra_body"] = {}
+                search_model.model_config_dict["extra_body"]["drop_messages"] = drop_msgs
+            
             search_agent.step(tasks[0])
             record_interaction(tracker, search_agent.chat_history, llm_id=round_idx + 1)
 
             # Feedback to main agent
-            feedback_context, feedback_content = search_to_main_selector.select(
+            feedback_context, feedback_content, _ = search_to_main_selector.select(
                 search_agent.memory.retrieve(), search_agent.chat_history, tracker, round_idx + 1
             )
             collected_info.append(feedback_content)
+            
+            # Compute offset for main context (existing messages before feedback)
+            main_offset = len(main_agent.memory.retrieve())
             main_agent.memory.write_records(feedback_context)
+            
+            # Compute drop_messages for main model (drop from search context)
+            # Main context: [...existing..., fwd1, ..., fwdM, revision_prompt]
+            # Offset = main_offset (number of existing messages)
+            # NOTE: drop_messages accumulates across rounds for main agent
+            if main_contextual:
+                drop_msgs = _compute_drop_messages(feedback_context, main_contextual, offset=main_offset)
+                if "extra_body" not in main_agent.model_backend.model_config_dict:
+                    main_agent.model_backend.model_config_dict["extra_body"] = {}
+                # Accumulate drop_messages across rounds
+                existing_drops = main_agent.model_backend.model_config_dict["extra_body"].get("drop_messages", {})
+                existing_drops.update(drop_msgs)
+                main_agent.model_backend.model_config_dict["extra_body"]["drop_messages"] = existing_drops
+            
             response = main_agent.step(TASK_REVISE_PROMPT.format(question=question))
             record_interaction(tracker, main_agent.chat_history, llm_id=0)
 

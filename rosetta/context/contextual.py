@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Dict, List, Literal, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 
@@ -7,6 +7,115 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 from transformers.cache_utils import DynamicCache
 
 from rosetta.context.utils import top_k_top_p_filtering
+
+def _apply_chat_template_ids(
+    tokenizer,
+    messages: List[dict],
+    *,
+    add_generation_prompt: bool,
+    enable_thinking: bool = False,
+    tools: Optional[List[Dict[str, Any]]] = None,
+) -> torch.Tensor:
+    template_kwargs: Dict[str, Any] = {"enable_thinking": enable_thinking}
+    if tools:
+        template_kwargs["tools"] = tools
+
+    return tokenizer.apply_chat_template(
+        messages,
+        tokenize=True,
+        return_tensors="pt",
+        add_generation_prompt=add_generation_prompt,
+        **template_kwargs,
+    )
+
+
+def tokenize_conversation_round_by_round(
+    tokenizer,
+    messages: List[dict],
+    *,
+    enable_thinking: bool = False,
+    tools: Optional[List[Dict[str, Any]]] = None,
+    add_generation_prompt_last: bool = False,
+) -> Tuple[torch.Tensor, List[Tuple[int, int, str, int]]]:
+    """
+    Tokenize conversation round-by-round for incremental prefill.
+
+    Pattern:
+    - Non-assistant messages are tokenized via chat-template diff slicing.
+    - If the next message is an assistant, generation-prompt tokens are also
+      included and attributed to the input message ID.
+    - Assistant messages are tokenized as content-only (or via chat-template
+      diff when `tool_calls` are present), excluding the final <|im_end|>.
+    """
+    if not messages:
+        return torch.empty((1, 0), dtype=torch.long), []
+
+    all_input_ids: List[torch.Tensor] = []
+    boundaries: List[Tuple[int, int, str, int]] = []
+    current_messages: List[dict] = []
+    seq_len = 0
+
+    eos_id = getattr(tokenizer, "eos_token_id", None)
+
+    for msg_id, msg in enumerate(messages):
+        role = msg.get("role")
+        start = seq_len
+
+        current_messages.append(dict(msg))
+
+        full_no_gen = _apply_chat_template_ids(
+            tokenizer,
+            current_messages,
+            add_generation_prompt=False,
+            enable_thinking=enable_thinking,
+            tools=tools,
+        )
+        new_ids = full_no_gen[:, seq_len:]
+
+        if role == "assistant":
+            if msg.get("tool_calls"):
+                if eos_id is not None and new_ids.numel() > 0:
+                    flat = new_ids[0]
+                    eos_pos = (flat == int(eos_id)).nonzero(as_tuple=False)
+                    if eos_pos.numel() > 0:
+                        new_ids = new_ids[:, : int(eos_pos[0].item())]
+            else:
+                content = msg.get("content") or ""
+                new_ids = tokenizer(
+                    content, return_tensors="pt", add_special_tokens=False
+                ).input_ids
+
+        if new_ids.numel() > 0:
+            all_input_ids.append(new_ids)
+            seq_len += int(new_ids.shape[1])
+
+        should_add_gen_prompt = False
+        if role != "assistant":
+            if msg_id < len(messages) - 1:
+                should_add_gen_prompt = (
+                    messages[msg_id + 1].get("role") == "assistant"
+                )
+            else:
+                should_add_gen_prompt = bool(add_generation_prompt_last)
+
+        if should_add_gen_prompt:
+            full_with_gen = _apply_chat_template_ids(
+                tokenizer,
+                current_messages,
+                add_generation_prompt=True,
+                enable_thinking=enable_thinking,
+                tools=tools,
+            )
+            gen_prompt_ids = full_with_gen[:, seq_len:]
+            if gen_prompt_ids.numel() > 0:
+                all_input_ids.append(gen_prompt_ids)
+                seq_len += int(gen_prompt_ids.shape[1])
+
+        boundaries.append((start, seq_len, str(role), msg_id))
+
+    if not all_input_ids:
+        return torch.empty((1, 0), dtype=torch.long), boundaries
+    return torch.cat(all_input_ids, dim=1), boundaries
 
 class ContextualModel:
     """Wrapper around HF model for explicit KV cache management with segment IDs.
@@ -19,9 +128,10 @@ class ContextualModel:
     drops, but `seq_length` reflects the logical position in the conversation.
     """
     
-    def __init__(self, model, tokenizer):
+    def __init__(self, model, tokenizer, *, verbose: bool = True):
         self.model = model
         self.tokenizer = tokenizer
+        self.verbose = verbose
         self.past_key_values = None
         self.round_ids = []      # Segment ID for each cached token
         self.position_ids = []   # Position ID for each cached token
@@ -219,11 +329,13 @@ class ContextualModel:
         indices_to_keep = [i for i, rid in enumerate(self.round_ids) if rid not in remove_ids]
         
         if len(indices_to_keep) == len(self.round_ids):
-            print(f"No rounds with IDs {remove_ids} found.")
+            if self.verbose:
+                print(f"No rounds with IDs {remove_ids} found.")
             return
             
         if len(indices_to_keep) == 0:
-            print("Dropping all rounds.")
+            if self.verbose:
+                print("Dropping all rounds.")
             self.reset()
             return
 
@@ -254,4 +366,5 @@ class ContextualModel:
         self.round_ids = [self.round_ids[i] for i in indices_to_keep]
         self.position_ids = [self.position_ids[i] for i in indices_to_keep]
         
-        print(f"Dropped IDs {remove_ids}. Cache: {len(self.round_ids)} tokens.")
+        if self.verbose:
+            print(f"Dropped IDs {remove_ids}. Cache: {len(self.round_ids)} tokens.")

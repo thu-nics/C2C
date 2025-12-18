@@ -14,6 +14,7 @@ eval_results/
 outputs/
 results/
 checkpoints/
+context_files/
 
 recipe/experiments/
 script/evaluation/deprecated/
@@ -23,6 +24,7 @@ script/analysis/oracle/
 run.sh
 test.py
 script/train/SFT_train_debug.py
+AGENTS.md
 
 # Secrets
 rosetta/context/workflow/API.py

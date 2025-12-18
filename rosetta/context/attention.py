@@ -16,83 +16,284 @@ from typing import List, Tuple, Optional, Dict, Any
 from rosetta.context.utils import top_k_top_p_filtering
 from rosetta.context.utils import _print_eval_results, _log_to_wandb, HAS_WANDB
 
-def tokenize_conversation_round_by_round(
-    tokenizer, 
-    messages: List[dict], 
+
+def tokenize_conversation_all_together(
+    tokenizer,
+    messages: List[dict],
+    *,
     enable_thinking: bool = False,
+    tools: Optional[List[Dict[str, Any]]] = None,
 ) -> Tuple[torch.Tensor, List[Tuple[int, int, str, int]]]:
     """
-    Tokenize conversation round by round, matching ContextualModel's incremental tokenization.
-    
-    Pattern (from contextual_chat_example.py):
-    - For user: tokenize with add_generation_prompt=True, record user + gen_prompt boundary
-    - For assistant: tokenize without gen_prompt, record assistant boundary (content after gen_prompt)
-    
-    Returns:
-        (input_ids, boundaries) where boundaries is list of (start, end, role, msg_id)
+    Tokenize the entire conversation in one pass and derive per-message boundaries.
+
+    This matches practical usage where callers build a single prompt with
+    `apply_chat_template(messages, add_generation_prompt=True)` and prefill once.
+
+    Boundaries are computed from prefix lengths under the same chat-template rules:
+    - The final user message includes the generation-prompt tokens.
+    - Earlier messages use `add_generation_prompt=False`.
     """
     if not messages:
         return torch.empty((1, 0), dtype=torch.long), []
 
-    def _apply(messages_, add_generation_prompt: bool) -> torch.Tensor:
+    template_kwargs: Dict[str, Any] = {"enable_thinking": enable_thinking}
+    if tools:
+        template_kwargs["tools"] = tools
+
+    # Always build the full prompt in one pass.
+    input_ids = tokenizer.apply_chat_template(
+        messages,
+        tokenize=True,
+        return_tensors="pt",
+        add_generation_prompt=True,
+        **template_kwargs,
+    )
+    seq_len = int(input_ids.shape[1])
+
+    # Try to derive boundaries directly from the fully-rendered prompt.
+    # This is important for chat templates that are context-dependent (e.g., Qwen3
+    # inserts different markup depending on whether an assistant message is final).
+    full_text = tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+        **template_kwargs,
+    )
+
+    boundaries: List[Tuple[int, int, str, int]] = []
+
+    # Qwen-style template: messages are wrapped in <|im_start|> ... <|im_end|>\n,
+    # and the generation prompt is a trailing "<|im_start|>assistant\n".
+    if "<|im_start|>" in full_text and "<|im_end|>" in full_text:
+        segments: List[str] = []
+        cursor = 0
+        for _ in messages:
+            start = full_text.find("<|im_start|>", cursor)
+            if start != cursor:
+                raise ValueError(
+                    "Failed to parse <|im_start|>/<|im_end|> blocks from chat template text "
+                    f"(cursor={cursor}, start={start})."
+                )
+            end_marker = "<|im_end|>\n"
+            end = full_text.find(end_marker, start)
+            if end < 0:
+                raise ValueError(
+                    "Failed to find end marker '<|im_end|>\\n' while parsing chat template text."
+                )
+            end += len(end_marker)
+            segments.append(full_text[start:end])
+            cursor = end
+
+        # Attach any remaining suffix (generation prompt) to the last message.
+        suffix = full_text[cursor:]
+        if suffix:
+            segments[-1] = segments[-1] + suffix
+
+        # Tokenize each segment text and ensure they concatenate to the full prompt IDs.
+        all_seg_ids: List[torch.Tensor] = []
+        for seg in segments:
+            seg_ids = tokenizer(
+                seg, return_tensors="pt", add_special_tokens=False
+            ).input_ids
+            all_seg_ids.append(seg_ids)
+        seg_concat = torch.cat(all_seg_ids, dim=1) if all_seg_ids else torch.empty((1, 0), dtype=torch.long)
+
+        if seg_concat.shape[1] != seq_len or not torch.equal(seg_concat, input_ids):
+            raise ValueError(
+                "Segment-based boundary derivation produced token IDs that do not match "
+                "the full `apply_chat_template(..., tokenize=True)` tokenization."
+            )
+
+        current_pos = 0
+        for msg_id, (msg, seg_ids) in enumerate(zip(messages, all_seg_ids)):
+            end_pos = current_pos + int(seg_ids.shape[1])
+            boundaries.append((current_pos, end_pos, str(msg.get("role")), msg_id))
+            current_pos = end_pos
+
+        if current_pos != seq_len:
+            raise ValueError(
+                f"Boundary computation did not consume full prompt: current_pos={current_pos} seq_len={seq_len}"
+            )
+
+        return input_ids, boundaries
+
+    # Fallback: compute boundaries by prefix token lengths.
+    # Note: This may fail for context-dependent templates; the Qwen-style branch above
+    # covers the primary case in this codebase.
+    current_pos = 0
+    for msg_id, msg in enumerate(messages):
+        prefix_add_gen = msg_id == (len(messages) - 1)
+        prefix_ids = tokenizer.apply_chat_template(
+            messages[: msg_id + 1],
+            tokenize=True,
+            return_tensors="pt",
+            add_generation_prompt=prefix_add_gen,
+            **template_kwargs,
+        )
+        end_pos = int(prefix_ids.shape[1])
+        if end_pos < current_pos or end_pos > seq_len:
+            raise ValueError(
+                f"Inconsistent chat-template tokenization while computing boundaries: "
+                f"msg_id={msg_id} current_pos={current_pos} end_pos={end_pos} seq_len={seq_len}"
+            )
+        boundaries.append((current_pos, end_pos, str(msg.get("role")), msg_id))
+        current_pos = end_pos
+
+    if current_pos != seq_len:
+        raise ValueError(
+            f"Boundary computation did not consume full prompt: current_pos={current_pos} seq_len={seq_len}"
+        )
+
+    return input_ids, boundaries
+
+
+def tokenize_prefix_conversation_all_together(
+    tokenizer,
+    messages: List[dict],
+    *,
+    enable_thinking: bool = False,
+    tools: Optional[List[Dict[str, Any]]] = None,
+) -> Tuple[torch.Tensor, List[Tuple[int, int, str, int]]]:
+    """
+    Tokenize the full prompt once and derive per-message boundaries by prefix-ID matching.
+
+    Algorithm:
+    - Compute the full prompt token IDs in one pass with `add_generation_prompt=True`.
+    - To compute message boundaries robustly across chat templates (including templates
+      whose rendering depends on whether a message is "final"), compute boundaries via
+      prefix matching:
+        - For each i < last: tokenize prefixes `messages[:i+1] + [dummy]` and
+          `messages[:i+2] + [dummy]` (with `add_generation_prompt=False`) and take the
+          longest common prefix length of those token ID sequences as the end boundary
+          for message i.
+        - Message (last) ends at the length of the full prompt with
+          `add_generation_prompt=False` (i.e., before generation prompt tokens).
+    - Finally, append one extra "dummy assistant" boundary spanning the generation
+      prompt tokens, so the last user round is separated from the generation prompt.
+
+    This approach does not rely on template-specific delimiters like <|im_start|>, and
+    works across tokenizers as long as `apply_chat_template(tokenize=True)` is available.
+    """
+    if not messages:
+        return torch.empty((1, 0), dtype=torch.long), []
+
+    template_kwargs: Dict[str, Any] = {"enable_thinking": enable_thinking}
+    if tools:
+        template_kwargs["tools"] = tools
+
+    # Dummy message used to stabilize chat-template rendering for intermediate prefixes.
+    # We intentionally use a user-role message so templates that special-case "final assistant"
+    # behavior (e.g., adding thinking blocks) render assistant messages consistently.
+    dummy_role = "user"
+    dummy_marker = "<<ROSETTA_DUMMY_MARKER>>"
+    dummy_msg = {"role": dummy_role, "content": dummy_marker}
+
+    def _apply_messages(msgs: List[dict], *, add_generation_prompt: bool) -> torch.Tensor:
         return tokenizer.apply_chat_template(
-            messages_,
+            msgs,
             tokenize=True,
             return_tensors="pt",
             add_generation_prompt=add_generation_prompt,
-            enable_thinking=enable_thinking,
+            **template_kwargs,
         )
 
-    all_input_ids: List[torch.Tensor] = []
+    def _lcp_len(a: torch.Tensor, b: torch.Tensor) -> int:
+        a1 = a[0]
+        b1 = b[0]
+        n = min(int(a1.numel()), int(b1.numel()))
+        if n == 0:
+            return 0
+        diff = (a1[:n] != b1[:n]).nonzero(as_tuple=False)
+        return n if diff.numel() == 0 else int(diff[0].item())
+
+    def _role_header_prefix(role: str) -> torch.Tensor:
+        """
+        Return a best-effort token-ID prefix for the role header emitted by the chat template.
+
+        We compute this inside a fixed 1-message prelude so templates that emit global
+        prefixes (e.g., tool preambles) don't contaminate the role-header estimate:
+        - base = tokenize([system:""])
+        - a = tokenize([system:"", role:ca])
+        - b = tokenize([system:"", role:cb])
+        - header = a[base_len : lcp(a,b)]
+        """
+        prelude = {"role": "system", "content": ""}
+        base = _apply_messages([prelude], add_generation_prompt=False)
+        base_len = int(base.shape[1])
+        candidates = [
+            ("Hello", "Tell"),
+            ("A", "B"),
+            ("0", "1"),
+            ("x", "y"),
+            ("<<<ROSETTA_A>>>", "<<<ROSETTA_B>>>"),
+        ]
+        for ca, cb in candidates:
+            a = _apply_messages([prelude, {"role": role, "content": ca}], add_generation_prompt=False)
+            b = _apply_messages([prelude, {"role": role, "content": cb}], add_generation_prompt=False)
+            hlen = _lcp_len(a, b)
+            min_len = min(int(a.shape[1]), int(b.shape[1]))
+            if hlen < min_len and hlen >= base_len:
+                return a[:, base_len:hlen]
+        return torch.empty((1, 0), dtype=torch.long)
+
+    roles = {str(m.get("role")) for m in messages}
+    roles.add(dummy_role)
+    role_headers: Dict[str, torch.Tensor] = {r: _role_header_prefix(r) for r in roles}
+
+    # Full prompt (what we will actually prefill).
+    input_ids = _apply_messages(messages, add_generation_prompt=True)
+    seq_len = int(input_ids.shape[1])
+
+    # Full prompt without generation prompt (used to split last user vs gen prompt).
+    no_gen_ids = _apply_messages(messages, add_generation_prompt=False)
+    no_gen_len = int(no_gen_ids.shape[1])
+    if no_gen_len > seq_len or not torch.equal(input_ids[:, :no_gen_len], no_gen_ids):
+        raise ValueError(
+            "Expected `add_generation_prompt=True` tokenization to start with the "
+            "`add_generation_prompt=False` tokenization, but it did not."
+        )
+
+    # Compute boundary endpoints for messages[0..last-1] via prefix matching with dummy.
+    boundary_ends: List[int] = []
+    for i in range(len(messages) - 1):
+        a = _apply_messages(messages[: i + 1] + [dummy_msg], add_generation_prompt=False)
+        b = _apply_messages(messages[: i + 2] + [dummy_msg], add_generation_prompt=False)
+        end_pos = _lcp_len(a, b)
+
+        # At the boundary, the sequences differ by (next message header) vs (dummy header).
+        # Since many templates share common header tokens across roles (e.g., "<|im_start|>"),
+        # the LCP will usually include that shared prefix; remove it so the boundary lands
+        # at the end of message i.
+        next_role = str(messages[i + 1].get("role"))
+        common = _lcp_len(role_headers[dummy_role], role_headers.get(next_role, torch.empty((1, 0), dtype=torch.long)))
+        if common > 0:
+            end_pos = max(0, end_pos - common)
+
+        if end_pos > no_gen_len:
+            end_pos = no_gen_len
+        boundary_ends.append(end_pos)
+    boundary_ends.append(no_gen_len)
+
     boundaries: List[Tuple[int, int, str, int]] = []
+    current_pos = 0
+    for msg_id, end_pos in enumerate(boundary_ends):
+        if end_pos < current_pos or end_pos > seq_len:
+            raise ValueError(
+                "Invalid boundary endpoints computed by prefix matching: "
+                f"msg_id={msg_id} current_pos={current_pos} end_pos={end_pos} seq_len={seq_len}"
+            )
+        boundaries.append((current_pos, end_pos, str(messages[msg_id].get("role")), msg_id))
+        current_pos = end_pos
 
-    current_messages: List[dict] = []
-    seq_len = 0
+    # Add a dummy assistant boundary for the generation prompt suffix (possibly empty).
+    boundaries.append((current_pos, seq_len, "assistant", len(messages)))
+    current_pos = seq_len
 
-    for msg_id, msg in enumerate(messages):
-        role = msg.get("role")
-        content = msg.get("content", "")
-        if role not in ("system", "user", "assistant"):
-            raise ValueError(f"Unsupported role: {role}")
+    if current_pos != seq_len:
+        raise ValueError(f"Boundary computation did not consume full prompt: current_pos={current_pos} seq_len={seq_len}")
 
-        start = seq_len
-
-        if role in ("system", "user"):
-            # Add message to the chat-template stream, then slice ONLY the newly-added tokens.
-            current_messages.append({"role": role, "content": content})
-
-            full_no_gen = _apply(current_messages, add_generation_prompt=False)
-            new_ids = full_no_gen[:, seq_len:]
-            if new_ids.numel() > 0:
-                all_input_ids.append(new_ids)
-                seq_len += new_ids.shape[1]
-
-            # User messages also include the generation prompt tokens, attributed to the same msg_id.
-            if role == "user":
-                full_with_gen = _apply(current_messages, add_generation_prompt=True)
-                gen_prompt_ids = full_with_gen[:, seq_len:]
-                if gen_prompt_ids.numel() > 0:
-                    all_input_ids.append(gen_prompt_ids)
-                    seq_len += gen_prompt_ids.shape[1]
-
-            boundaries.append((start, seq_len, role, msg_id))
-            continue
-
-        # Assistant: before appending assistant content, ensure the stream up to the previous user
-        # has already contributed its generation-prompt tokens (handled in the "user" branch above).
-        #
-        # Then append assistant tokens directly after the stream (no chat-template wrapper here).
-        assistant_ids = tokenizer(content, return_tensors="pt", add_special_tokens=False).input_ids
-        if assistant_ids.numel() > 0:
-            all_input_ids.append(assistant_ids)
-            seq_len += assistant_ids.shape[1]
-
-        boundaries.append((start, seq_len, role, msg_id))
-        current_messages.append({"role": "assistant", "content": content})
-
-    if not all_input_ids:
-        return torch.empty((1, 0), dtype=torch.long), boundaries
-    return torch.cat(all_input_ids, dim=1), boundaries
+    return input_ids, boundaries
 
 
 def get_round_boundaries(tokenizer, messages, max_length: int = 2048) -> List[Tuple[int, int, str, int]]:
@@ -244,12 +445,14 @@ def generate_with_contextual_mask(
     One-shot prefill + decode generation that simulates KV-dropping via attention masks.
 
     This function is intentionally a *single-turn* primitive: it generates the assistant
-    response for a conversation that ends with a user message. Multi-round behavior is
-    achieved by calling this function repeatedly outside (as in the examples).
+    response for a conversation that ends with a non-assistant message (typically `user`,
+    but `tool` is also supported). Multi-round behavior is achieved by calling this
+    function repeatedly outside (as in the examples).
 
     Semantics (matching `ContextualModel.generate_step` / examples.yaml ID scheme):
     - Let `input_id` be the ID of the last user message (the last element in `messages`).
-    - The generation prompt tokens are treated as part of `input_id`.
+    - The generation prompt tokens are included in prefill; for boundary bookkeeping we
+      treat them as a dummy assistant segment with `msg_id = output_id`.
     - Generated assistant tokens are treated as `output_id = input_id + 1`.
     - Drops at key `input_id` are applied AFTER prefill of the generation prompt:
         - Prefill uses drops with drop_at < input_id
@@ -279,25 +482,30 @@ def prepare_context(
     messages: List[dict],
     drop_ids: Optional[Dict[int, List[int]]] = None,
     enable_thinking: bool = False,
+    tools: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """
     Prepare a single-turn generation context (prefill ids + boundaries + drop metadata).
 
-    The conversation must end with a user message. The returned dict is intended to be
-    passed as `context_kwargs` into `generate(...)`.
+    The conversation must end with a non-assistant message (typically `user`, but `tool`
+    is also supported). The returned dict is intended to be passed as `context_kwargs`
+    into `generate(...)`.
     """
     if drop_ids is None:
         drop_ids = {}
 
-    if not messages or messages[-1].get("role") != "user":
-        raise ValueError("messages must be non-empty and end with a user message.")
+    if not messages or messages[-1].get("role") == "assistant":
+        raise ValueError("messages must be non-empty and must not end with an assistant message.")
 
     # Message IDs are the message indices in `messages` (0, 1, 2, ...).
     input_id = len(messages) - 1
 
-    # Tokenize conversation round by round (user includes gen_prompt, assistant is content only).
-    input_ids, boundaries = tokenize_conversation_round_by_round(
-        tokenizer, messages, enable_thinking=enable_thinking,
+    # Tokenize the entire prompt once (matches practical generation), then derive boundaries
+    # using prefix-ID matching (more robust across tokenizers/templates).
+    # Note: boundaries include an extra dummy assistant segment that covers the
+    # generation-prompt suffix tokens.
+    input_ids, boundaries = tokenize_prefix_conversation_all_together(
+        tokenizer, messages, enable_thinking=enable_thinking, tools=tools
     )
 
     # Drops are keyed by the user-message ID at which the drop happens.
@@ -542,4 +750,3 @@ def run_evaluation(
     
     model.train()
     return eval_results
-
