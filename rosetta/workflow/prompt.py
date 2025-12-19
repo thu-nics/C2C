@@ -63,25 +63,25 @@ Constraints:
 Example (format only):
 {{"justification":"Both Scott Derrickson and Ed Wood were American.", "answer":"Yes"}}"""
 
-SIMPLE_RESEARCH_PROMPT = """Answer the question using multiple steps and tools.
+SIMPLE_RESEARCH_PROMPT = """Analyze the task and decompose it into subtasks if the task requires multiple searches.
 
-Question: {question}
+Objective:
+{question}
 
-Tool-use protocol:
-1) Output ONLY a search_engine tool call in <tool_call>...</tool_call>.
-   Example:
-   <tool_call>
-   {{"name":"search_engine","arguments":{{"query":"example query","top_k":5}}}}
-   </tool_call>
-   Use a query that includes key phrases from the question.
-2) You MUST call search_engine a second time before answering.
-   Do not reuse specific series/author names from the first results unless they match ALL clues.
-   If any result looks like a companion book (e.g., a title with "Chronicles"), use that title plus "series".
-   Otherwise, add "chronicles" and "alien species" to the query.
-3) After the second tool returns, answer using the required JSON format.
-4) Do not answer from memory; verify with search results.
+List the subtasks as a numbered list (no tags). Each subtask should be concise, concrete, and achievable.
+Ensure that the task plan is created without asking any questions. Be specific and clear.
 
-Return ONLY a JSON object on a single line (no markdown, no code fences), exactly with these keys:
+Given a subtask, complete it by either searching the internet if external information is needed, or answering directly if you already know the answer. Provide a concise summary of your findings or answer.
+
+Revise the task list based on the search result above.
+Original question: {question}
+
+Guidelines:
+- Build on previous findings. If candidates were found, verify them against remaining criteria.
+- If a subtask failed, try a different approach (e.g., search for specific candidate + criterion).
+- Provide the final answer when you have enough information.
+
+After the final tool response, return ONLY a JSON object on a single line (no markdown, no code fences), exactly with these keys:
 - justification: string (1-2 short sentences)
 - answer: string (the final answer span only)
 

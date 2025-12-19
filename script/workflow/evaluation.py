@@ -24,8 +24,7 @@ from camel.toolkits import FunctionTool
 
 from rosetta.context.selector import ContextSelector
 from rosetta.context.track import InteractionTracker
-from rosetta.workflow.oneflow import do_research
-from rosetta.workflow.evaluation import extract_answer, exact_match, load_done_ids
+from rosetta.workflow.evaluation import extract_answer, exact_match, load_done_ids, run_research
 from rosetta.workflow.retriever import search_engine
 from rosetta.workflow.hf_qwen_model import HFContextAttentionQwenModel
 
@@ -100,6 +99,7 @@ def main() -> None:
     parser.add_argument("--model-url", default="http://localhost:30000/v1")
     parser.add_argument("--model-type", default="contextual-model")
     parser.add_argument("--tokenizer", default="Qwen/Qwen3-32B")
+    parser.add_argument("--mode", default="oneflow", choices=["oneflow", "single"])
     args = parser.parse_args()  
 
     # Environment variables (search tools)
@@ -167,6 +167,7 @@ def main() -> None:
 
     total = 0
     correct = 0
+    use_single = args.mode == "single"
 
     # Always stream records during the run to JSONL (output file or sidecar).
     jsonl_f = run_jsonl_path.open("a", encoding="utf-8")
@@ -181,7 +182,8 @@ def main() -> None:
 
             tracker = InteractionTracker(tokenizer=tokenizer)
             # reset main agent memory
-            main_agent = ChatAgent(system_message="You are a helpful assistant.", model=model)
+            tools = [search_tool] if use_single else None
+            main_agent = ChatAgent(system_message="You are a helpful assistant.", model=model, tools=tools)
             
             t0 = time.time()
             pred_raw = ""
@@ -189,30 +191,38 @@ def main() -> None:
             llm0_messages: Optional[list[dict[str, Any]]] = None
             err: Optional[str] = None
             try:
-                context_plan = {
-                    # Memory selectors (all-to-all)
-                    'search_to_main_selector': ContextSelector(
-                        filter_fn=ContextSelector.filter_search_only,
-                        select_fn=ContextSelector.select_skip_system
-                    ),
-                    'main_to_search_selector': ContextSelector(
-                        filter_fn=None,
-                        select_fn=ContextSelector.select_skip_system
-                    ),
-                    # Contextual selectors (attention drop)
-                    'search_contextual': ContextSelector(
-                        select_fn=ContextSelector.select_none  # Drop all from main
-                    ),
-                    'main_contextual': ContextSelector(
-                        select_fn=ContextSelector.select_query_response  # Keep query+response from search
-                    ),
-                }
-                pred_raw, tracker = do_research(
+                if use_single:
+                    context_plan = {
+                        "main_contextual": ContextSelector(
+                            select_fn=ContextSelector.select_query_response
+                        ),
+                    }
+                else:
+                    context_plan = {
+                        # Memory selectors (all-to-all)
+                        "search_to_main_selector": ContextSelector(
+                            filter_fn=ContextSelector.filter_search_only,
+                            select_fn=ContextSelector.select_skip_system,
+                        ),
+                        "main_to_search_selector": ContextSelector(
+                            filter_fn=None,
+                            select_fn=ContextSelector.select_skip_system,
+                        ),
+                        # Contextual selectors (attention drop)
+                        "search_contextual": ContextSelector(
+                            select_fn=ContextSelector.select_none  # Drop all from main
+                        ),
+                        "main_contextual": ContextSelector(
+                            select_fn=ContextSelector.select_query_response  # Keep query+response from search
+                        ),
+                    }
+                pred_raw, tracker = run_research(
+                    mode=args.mode,
                     question=question,
                     main_agent=main_agent,
-                    search_model=search_model, 
+                    search_model=search_model if not use_single else None,
                     tracker=tracker,
-                    search_tool=search_tool,
+                    search_tool=search_tool if not use_single else None,
                     context_plan=context_plan,
                     show_status=False,
                 )
@@ -261,4 +271,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

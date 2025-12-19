@@ -9,7 +9,15 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Optional
+from typing import Optional, TYPE_CHECKING, Tuple
+
+from rosetta.workflow.singleflow import single_research
+
+if TYPE_CHECKING:
+    from camel.agents import ChatAgent
+    from camel.models import BaseModelBackend
+    from camel.toolkits import FunctionTool
+    from rosetta.context.track import InteractionTracker
 
 _ANSWER_LINE_RE = re.compile(
     r'^\s*"answer"\s*:\s*"(?P<ans>.*?)"\s*(?:,|\})\s*$',
@@ -105,3 +113,39 @@ def load_done_ids(jsonl_path: Path) -> set[str]:
                 continue
     return done
 
+
+def run_research(
+    mode: str,
+    *,
+    question: str,
+    main_agent: "ChatAgent",
+    tracker: Optional["InteractionTracker"] = None,
+    search_model: Optional["BaseModelBackend"] = None,
+    search_tool: Optional["FunctionTool"] = None,
+    context_plan: Optional[dict] = None,
+    show_status: bool = True,
+) -> Tuple[str, Optional["InteractionTracker"]]:
+    """Dispatch to the requested research workflow."""
+    mode = mode.lower()
+    if mode == "single":
+        return single_research(
+            question=question,
+            main_agent=main_agent,
+            tracker=tracker,
+            context_plan=context_plan,
+        )
+    if mode == "oneflow":
+        if search_model is None:
+            raise ValueError("search_model is required for mode='oneflow'")
+        from rosetta.workflow.oneflow import do_research
+
+        return do_research(
+            question=question,
+            main_agent=main_agent,
+            search_model=search_model,
+            tracker=tracker,
+            search_tool=search_tool,
+            context_plan=context_plan,
+            show_status=show_status,
+        )
+    raise ValueError(f"Unsupported mode: {mode}")
