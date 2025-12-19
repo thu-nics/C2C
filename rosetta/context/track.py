@@ -1,13 +1,16 @@
 """Tracking system for model interactions and content provenance."""
 
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 import matplotlib.pyplot as plt
 from transformers import AutoTokenizer
 
 import warnings
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from camel.memories import MemoryRecord
 
 
 @dataclass
@@ -34,19 +37,22 @@ class InteractionTracker:
         - Export produces R×M matrix where R=num_interactions, M=pool_size
     """
 
-    def __init__(self, tokenizer: Optional[AutoTokenizer] = None, concise_str: bool = False):
+    def __init__(self, tokenizer: Optional[AutoTokenizer] = None, concise_str: bool = False, sort_by_llm_id: bool = False):
         """Initialize tracker.
 
         Args:
             tokenizer: Optional HuggingFace tokenizer for apply_chat_template in get_message_text().
             concise_str: If True, __str__ groups elements with same content (different roles) into one column.
+            sort_by_llm_id: If True, __str__ sorts interaction rows by LLM ID.
         """
         self._pool: list[ContentElement] = []
         self._content_to_uid: dict[tuple[str, str], int] = {}
+        self._uuid_to_uid: dict[str, int] = {}  # MemoryRecord.uuid -> uid for cross-LLM alignment
         self._interactions: list[tuple[int, int, list[int]]] = []  # (llm_id, response_uid, context_uids)
         self._edges: set[tuple[int, int]] = set()  # (from_uid, to_uid) for dependency graph
         self._tokenizer = tokenizer
         self._concise_str = concise_str
+        self._sort_by_llm_id = sort_by_llm_id
         self._llm_tools: dict[int, list] = {}  # llm_id -> tools list
 
     def record(self, messages: list[dict], llm_id: int = 0) -> int:
@@ -71,6 +77,8 @@ class InteractionTracker:
             raise ValueError("Last message must be from assistant")
 
         uids = []
+        uids_seen_in_this_call = set()  # Track UIDs used in this record() call
+        
         for msg in messages:
             role = msg["role"]
             content = msg["content"]  # Content for matching (may be str(tool_calls))
@@ -79,6 +87,19 @@ class InteractionTracker:
 
             if key in self._content_to_uid:
                 uid = self._content_to_uid[key]
+                # If this UID was already used in this call, create a new one
+                # This handles repeated messages (e.g., same prompt used multiple times)
+                if uid in uids_seen_in_this_call:
+                    uid = len(self._pool) + 1  # 1-indexed
+                    self._pool.append(ContentElement(
+                        uid=uid,
+                        role=role,
+                        content=content,
+                        original_content=original_content,
+                        tool_calls=msg.get("tool_calls"),
+                        tool_call_id=msg.get("tool_call_id"),
+                    ))
+                    # Don't update _content_to_uid - keep pointing to first occurrence
             else:
                 uid = len(self._pool) + 1  # 1-indexed
                 self._pool.append(ContentElement(
@@ -92,6 +113,7 @@ class InteractionTracker:
                 self._content_to_uid[key] = uid
 
             uids.append(uid)
+            uids_seen_in_this_call.add(uid)
 
         response_uid = uids[-1]
         context_uids = uids[:-1]
@@ -137,6 +159,43 @@ class InteractionTracker:
             List of tool schemas if registered, None otherwise.
         """
         return self._llm_tools.get(llm_id)
+
+    def register_shared_records(self, records: list["MemoryRecord"]) -> None:
+        """Register MemoryRecords being shared between agents for UUID-based alignment.
+
+        When records are forwarded from one agent to another, call this method
+        before writing them to the target agent's memory. This establishes
+        UUID -> UID mapping so that when the target agent's interaction is recorded,
+        shared messages are correctly aligned to existing UIDs (not treated as new).
+
+        Args:
+            records: List of MemoryRecords being shared. Each record's UUID will be
+                     mapped to an existing UID (via content matching) or a new UID.
+        """
+        for record in records:
+            uuid_str = str(record.uuid)
+            if uuid_str in self._uuid_to_uid:
+                continue  # Already registered
+
+            role = record.role_at_backend.name.lower()
+            content = record.message.content or ""
+            key = (role, content)
+
+            # Map UUID to existing UID if content matches, otherwise no mapping yet
+            # (UID will be created when record() is called)
+            if key in self._content_to_uid:
+                self._uuid_to_uid[uuid_str] = self._content_to_uid[key]
+
+    def get_uid_by_uuid(self, uuid_str: str) -> Optional[int]:
+        """Get UID for a registered UUID.
+
+        Args:
+            uuid_str: The UUID string to look up.
+
+        Returns:
+            UID if found, None otherwise.
+        """
+        return self._uuid_to_uid.get(uuid_str)
 
     def _compute_tids(self) -> Optional[dict[int, int]]:
         """Compute topological order (uid -> tid) using Kahn's algorithm.
@@ -191,6 +250,8 @@ class InteractionTracker:
         
         If concise_str=True, elements with same content (but different roles) are
         merged into one column with a shared tcid (topology content id).
+        
+        If sort_by_llm_id=True, interaction rows are sorted by LLM ID.
         """
         num_interactions = len(self._interactions)
         pool_size = len(self._pool)
@@ -210,6 +271,16 @@ class InteractionTracker:
             return self._str_concise(uid_to_tid, matrix)
         else:
             return self._str_full(uid_to_tid, matrix)
+
+    def _get_interactions_for_display(self) -> list[tuple[int, tuple[int, int, list[int]]]]:
+        """Get interactions with original indices, optionally sorted by LLM ID.
+        
+        Returns:
+            List of (original_index, (llm_id, response_uid, context_uids)) tuples.
+        """
+        if self._sort_by_llm_id:
+            return sorted(enumerate(self._interactions), key=lambda x: (x[1][0], x[0]))
+        return list(enumerate(self._interactions))
 
     def _str_full(self, uid_to_tid: dict[int, int], matrix: np.ndarray) -> str:
         """Full visualization with one column per uid."""
@@ -234,15 +305,15 @@ class InteractionTracker:
         lines.append(" " * label_width + "-" * (pool_size * tid_width))
 
         # Each interaction row
-        for i, (llm_id, response_uid, _) in enumerate(self._interactions):
+        for orig_i, (llm_id, response_uid, _) in self._get_interactions_for_display():
             response_tid = uid_to_tid[response_uid]
-            label = f"I{i} (LLM{llm_id})→T{response_tid}"
+            label = f"I{orig_i} (LLM{llm_id})→T{response_tid}"
             row_parts = []
             for uid in uid_order:
                 j = uid - 1  # 0-indexed for matrix/pool access
                 if uid == response_uid:
                     row_parts.append(f"{self._ROLE_COLORS['assistant']}[R]{self._RESET}")
-                elif matrix[i, j]:
+                elif matrix[orig_i, j]:
                     role = self._pool[j].role
                     color = self._ROLE_COLORS.get(role, "")
                     row_parts.append(f"[{color}■{self._RESET}]")
@@ -295,9 +366,9 @@ class InteractionTracker:
         lines.append(" " * label_width + "-" * (num_tcids * tcid_width))
 
         # Each interaction row
-        for i, (llm_id, response_uid, context_uids) in enumerate(self._interactions):
+        for orig_i, (llm_id, response_uid, context_uids) in self._get_interactions_for_display():
             response_tcid = uid_to_tcid[response_uid]
-            label = f"I{i} (LLM{llm_id})→C{response_tcid}"
+            label = f"I{orig_i} (LLM{llm_id})→C{response_tcid}"
             row_parts = []
 
             for tcid, group in enumerate(sorted_groups, start=1):
@@ -307,7 +378,7 @@ class InteractionTracker:
                 for uid in group:
                     if uid == response_uid:
                         is_response = True
-                    elif matrix[i, uid - 1]:  # uid is in context
+                    elif matrix[orig_i, uid - 1]:  # uid is in context
                         role = self._pool[uid - 1].role
                         if role not in roles_present:
                             roles_present.append(role)

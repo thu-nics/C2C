@@ -63,6 +63,36 @@ Constraints:
 Example (format only):
 {{"justification":"Both Scott Derrickson and Ed Wood were American.", "answer":"Yes"}}"""
 
+SIMPLE_RESEARCH_PROMPT = """Answer the question using multiple steps and tools.
+
+Question: {question}
+
+Tool-use protocol:
+1) Output ONLY a search_engine tool call in <tool_call>...</tool_call>.
+   Example:
+   <tool_call>
+   {{"name":"search_engine","arguments":{{"query":"example query","top_k":5}}}}
+   </tool_call>
+   Use a query that includes key phrases from the question.
+2) You MUST call search_engine a second time before answering.
+   Do not reuse specific series/author names from the first results unless they match ALL clues.
+   If any result looks like a companion book (e.g., a title with "Chronicles"), use that title plus "series".
+   Otherwise, add "chronicles" and "alien species" to the query.
+3) After the second tool returns, answer using the required JSON format.
+4) Do not answer from memory; verify with search results.
+
+Return ONLY a JSON object on a single line (no markdown, no code fences), exactly with these keys:
+- justification: string (1-2 short sentences)
+- answer: string (the final answer span only)
+
+Constraints:
+- Do not include any extra keys.
+- Do not include any extra text before/after the JSON.
+- For yes/no questions, answer must be exactly "Yes" or "No".
+
+Example (format only):
+{{"justification":"Both Scott Derrickson and Ed Wood were American.", "answer":"Yes"}}"""
+
 SEARCH_AGENT_PROMPT = """You are a helpful search agent. Given a subtask, complete it by either:
 - Searching the internet if external information is needed.
 - Answering directly if you already know the answer.

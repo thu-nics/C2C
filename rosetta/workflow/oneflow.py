@@ -160,6 +160,9 @@ def do_research(
             forward_context, _, _ = main_to_search_selector.select(
                 main_agent.memory.retrieve(), main_agent.chat_history, tracker, round_idx + 1
             )
+            # Register UUIDs for alignment before writing to search agent
+            if tracker is not None:
+                tracker.register_shared_records(forward_context)
             search_agent.memory.write_records(forward_context)
             
             # Compute drop_messages for search model (drop from main context)
@@ -182,6 +185,9 @@ def do_research(
             
             # Compute offset for main context (existing messages before feedback)
             main_offset = len(main_agent.memory.retrieve())
+            # Register UUIDs for alignment before writing to main agent
+            if tracker is not None:
+                tracker.register_shared_records(feedback_context)
             main_agent.memory.write_records(feedback_context)
             
             # Compute drop_messages for main model (drop from search context)

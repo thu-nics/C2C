@@ -14,11 +14,9 @@ from camel.toolkits import FunctionTool, SearchToolkit
 from rosetta.context.track import InteractionTracker
 from rosetta.context.selector import ContextSelector
 
-from rosetta.workflow.research_flow import direct_subagent_research, extend_subagent_research, extend_sequential_subagent_research, full_subagent_research
 from rosetta.workflow.oneflow import do_research
 from rosetta.workflow.retriever import search_engine
 from rosetta.workflow.hf_qwen_model import HFQwenModel, HFContextAttentionQwenModel
-from rosetta.workflow.hf_contextual_qwen_model import HFContextualQwenModel
 
 ### Environment Variables ###
 from rosetta.workflow.API import FIRECRAWL_API_KEY, GOOGLE_API_KEY, SEARCH_ENGINE_ID
@@ -61,36 +59,59 @@ if __name__ == "__main__":
     # weave.init("nics-efc/camel")
     # with weave.thread(thread_id="subagent_research"):
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-32B")
-    tracker = InteractionTracker(tokenizer=tokenizer)
+    tracker = InteractionTracker(tokenizer=tokenizer, sort_by_llm_id=True)
 
     search_tool = FunctionTool(search_engine)
     # search_tool = FunctionTool(SearchToolkit().search_google)
 
     # question = "Were Scott Derrickson and Ed Wood of the same nationality?"
-    # question="What science fantasy young adult series, told in first person, has a set of companion books narrating the stories of enslaved worlds and alien species?" # answer: Animorphs
-    question="Which performance act has a higher instrument to person ratio, Badly Drawn Boy or Wolf Alice?"
+    question="What science fantasy young adult series, told in first person, has a set of companion books narrating the stories of enslaved worlds and alien species?" # answer: Animorphs
+    # question="Which performance act has a higher instrument to person ratio, Badly Drawn Boy or Wolf Alice?"
 
     # Context plan with memory selectors and contextual (attention drop) selectors
+    # Contexualization
+    # context_plan = {
+    #     # Memory selectors (what goes into prompt) - all-to-all
+    #     'search_to_main_selector': ContextSelector(
+    #         filter_fn=ContextSelector.filter_search_only,
+    #         select_fn=ContextSelector.select_skip_system
+    #     ),
+    #     'main_to_search_selector': ContextSelector(
+    #         filter_fn=None,
+    #         select_fn=ContextSelector.select_skip_system
+    #     ),
+    #     # Contextual selectors (what to attend to - select_fn returns KEEP indices, drop = complement)
+    #     'search_contextual': ContextSelector(
+    #         select_fn=ContextSelector.select_none  # Keep nothing from main → drop all
+    #     ),
+    #     'main_contextual': ContextSelector(
+    #         select_fn=ContextSelector.select_query_response  # Keep query+response from search
+    #     ),
+    # }
+
+    # Direct
+    # context_plan = {
+    #     # Memory selectors (what goes into prompt) - all-to-all
+    #     'search_to_main_selector': ContextSelector(
+    #         filter_fn=None,
+    #         select_fn=ContextSelector.select_query_response_with_system
+    #     ),
+    #     'main_to_search_selector': ContextSelector(
+    #         filter_fn=None,
+    #         select_fn=ContextSelector.select_none
+    #     )
+    # }
+
+    # Extend
     context_plan = {
-        # Memory selectors (what goes into prompt) - all-to-all
         'search_to_main_selector': ContextSelector(
             filter_fn=ContextSelector.filter_search_only,
-            # select_fn=ContextSelector.select_query_response
-            select_fn=ContextSelector.select_skip_system
+            select_fn=ContextSelector.select_query_response_with_system
         ),
         'main_to_search_selector': ContextSelector(
             filter_fn=None,
-            # select_fn=ContextSelector.select_none
-            # select_fn=ContextSelector.select_initial
             select_fn=ContextSelector.select_skip_system
-        ),
-        # Contextual selectors (what to attend to - select_fn returns KEEP indices, drop = complement)
-        'search_contextual': ContextSelector(
-            select_fn=ContextSelector.select_none  # Keep nothing from main → drop all
-        ),
-        'main_contextual': ContextSelector(
-            select_fn=ContextSelector.select_query_response  # Keep query+response from search
-        ),
+        )
     }
 
     response, tracker = do_research(
