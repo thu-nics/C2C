@@ -7,7 +7,7 @@ from camel.toolkits import FunctionTool, SearchToolkit
 from camel.tasks import Task
 from camel.types import OpenAIBackendRole
 
-from rosetta.context.track import InteractionTracker, record_interaction
+from rosetta.workflow.track import InteractionTracker, record_interaction
 from rosetta.workflow.prompt import (
     SEARCH_TASK_DECOMPOSE_PROMPT, SEARCH_AGENT_PROMPT, RESPONSE_PROMPT_DIRECT
 )

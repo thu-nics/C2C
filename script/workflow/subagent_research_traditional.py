@@ -11,7 +11,7 @@ from camel.models import ModelFactory
 from camel.types import ModelPlatformType
 from camel.toolkits import FunctionTool, SearchToolkit
 
-from rosetta.context.track import InteractionTracker
+from rosetta.workflow.track import InteractionTracker
 from rosetta.workflow.research_flow import direct_subagent_research, extend_subagent_research, extend_sequential_subagent_research, full_subagent_research
 from rosetta.workflow.oneflow import do_research
 from rosetta.workflow.retriever import search_engine

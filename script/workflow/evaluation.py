@@ -22,8 +22,8 @@ from camel.models import ModelFactory
 from camel.types import ModelPlatformType
 from camel.toolkits import FunctionTool
 
-from rosetta.context.selector import ContextSelector
-from rosetta.context.track import InteractionTracker
+from rosetta.workflow.selector import ContextSelector
+from rosetta.workflow.track import InteractionTracker
 from rosetta.workflow.evaluation import extract_answer, exact_match, load_done_ids, run_research
 from rosetta.workflow.retriever import search_engine
 from rosetta.workflow.hf_qwen_model import HFContextAttentionQwenModel

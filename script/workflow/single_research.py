@@ -11,8 +11,8 @@ from camel.models import ModelFactory
 from camel.types import ModelPlatformType
 from camel.toolkits import FunctionTool
 
-from rosetta.context.track import InteractionTracker
-from rosetta.context.selector import ContextSelector
+from rosetta.workflow.track import InteractionTracker
+from rosetta.workflow.selector import ContextSelector
 from rosetta.workflow.singleflow import single_research
 from rosetta.workflow.retriever import search_engine
 

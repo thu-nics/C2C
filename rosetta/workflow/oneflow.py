@@ -9,8 +9,8 @@ from camel.toolkits import FunctionTool, SearchToolkit
 from camel.memories import ContextRecord, MemoryRecord
 from camel.types import OpenAIBackendRole
 
-from rosetta.context.track import InteractionTracker, record_interaction
-from rosetta.context.selector import ContextSelector
+from rosetta.workflow.track import InteractionTracker, record_interaction
+from rosetta.workflow.selector import ContextSelector
 from rosetta.workflow.prompt import SEARCH_TASK_DECOMPOSE_PROMPT, TASK_REVISE_PROMPT, FORCE_ANSWER_PROMPT, SEARCH_AGENT_PROMPT
 from rosetta.workflow.camel_utils import context_records_to_memory_records, MemoryRecord_flip_role
 

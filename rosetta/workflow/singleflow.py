@@ -3,8 +3,8 @@ from typing import Optional, Tuple
 from camel.agents import ChatAgent
 from camel.types import OpenAIBackendRole
 
-from rosetta.context.track import InteractionTracker, record_interaction
-from rosetta.context.selector import ContextSelector
+from rosetta.workflow.track import InteractionTracker, record_interaction
+from rosetta.workflow.selector import ContextSelector
 from rosetta.workflow.camel_utils import context_records_to_memory_records
 from rosetta.workflow.prompt import SIMPLE_RESEARCH_PROMPT
 

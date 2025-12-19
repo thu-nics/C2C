@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from camel.agents import ChatAgent
     from camel.models import BaseModelBackend
     from camel.toolkits import FunctionTool
-    from rosetta.context.track import InteractionTracker
+    from rosetta.workflow.track import InteractionTracker
 
 _ANSWER_LINE_RE = re.compile(
     r'^\s*"answer"\s*:\s*"(?P<ans>.*?)"\s*(?:,|\})\s*$',

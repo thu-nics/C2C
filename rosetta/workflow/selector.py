@@ -2,7 +2,7 @@ from typing import Tuple, List
 
 from camel.memories import MemoryRecord, ContextRecord
 
-from rosetta.context.track import InteractionTracker
+from rosetta.workflow.track import InteractionTracker
 from rosetta.workflow.camel_utils import context_records_to_memory_records
 
 class ContextSelector:
