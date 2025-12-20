@@ -364,7 +364,9 @@ def setup_models(model_config: Dict[str, Any], training_mode: str, device: str =
             model_list=[base_model, teacher_model],
             base_model_idx=0,
             projector_list=projector_list,
-            aggregator_list=aggregator_list
+            aggregator_list=aggregator_list,
+            include_response=model_config.get("include_response", False),
+            multi_source_fusion_mode=model_config.get("multi_source_fusion_mode", "sequential")
         ).to(device).eval()
         
         

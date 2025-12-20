@@ -433,12 +433,14 @@ def load_rosetta_model(model_config: Dict[str, Any], eval_config: Dict[str, Any]
     
     # Get multi-source fusion mode from config (default to "sequential" for backward compatibility)
     multi_source_fusion_mode = rosetta_config.get("multi_source_fusion_mode", "sequential")
+    include_response = rosetta_config.get("include_response", False)
     
     rosetta_model = RosettaModel(
         model_list=model_list,
         base_model_idx=0,
         projector_list=projector_list,
         aggregator_list=[],
+        include_response=include_response,
         multi_source_fusion_mode=multi_source_fusion_mode,
     ).to(device).eval()
 
