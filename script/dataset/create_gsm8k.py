@@ -186,9 +186,7 @@ def parse_args():
 def build_gsm8k_prompt(question: str) -> str:
     """Format a GSM8K question with the unified evaluator math template."""
     template = (
-        "Solve the following math problem step by step. The last line of your response should be of the form Answer: $ANSWER (without quotes) where $ANSWER is the answer to the problem.\n\n"
-        "{question}\n\n"
-        "Remember to put your answer on its own line after \"Answer:\", and you do not need to use a \\boxed command."
+        "{question}"
     )
     return template.replace("{question}", question or "")
 
@@ -286,7 +284,7 @@ def save_partial_results_csv(partials, output_dir):
     if not partials:
         return
     os.makedirs(output_dir, exist_ok=True)
-    csv_path = os.path.join(output_dir, "Dolly_generated_results.csv")
+    csv_path = os.path.join(output_dir, "gsm8k_generated_results.csv")
     df = pd.DataFrame([p.__dict__ for p in partials])
     header = not os.path.exists(csv_path)
     df.to_csv(csv_path, mode="a", header=header, index=False)
@@ -353,7 +351,7 @@ def prepare_prompts(items, tokenizer=None, enable_thinking=False):
                     messages,
                     tokenize=False,
                     add_generation_prompt=True,
-                    enable_thinking=False,
+                    enable_thinking=True,
                 )
             else:
                 # Fallback to simple formatting if tokenizer is not available
@@ -596,12 +594,12 @@ def main():
     if items_to_load:
         print(f"Loading first {items_to_load} items from GSM8K dataset")
         dataset = load_dataset(args.dataset_path, "main")
-        dataset = dataset["train"]
+        dataset = dataset[args.split]
         dataset = dataset.select(range(items_to_load))
     else:
         print(f"Loading all items from GSM8K dataset")
         dataset = load_dataset(args.dataset_path, "main")
-        dataset = dataset["train"]
+        dataset = dataset[args.split]
     
     print(f"Loaded GSM8K dataset with {len(dataset)} items")
     

@@ -7,7 +7,7 @@ echo "🚀 Launching SGLang server..."
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 
 python3 -m sglang.launch_server \
-    --model-path Qwen/Qwen3-4B \
+    --model-path /share/public/public_models/Qwen3-32B \
     --host 0.0.0.0 \
     --port 30000 \
     --tp-size 1 \
