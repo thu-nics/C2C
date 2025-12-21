@@ -134,6 +134,12 @@ def parse_args():
     parser.add_argument(
         "--min_p", type=float, default=-1.0, help="Min-p sampling parameter for generation"
     )
+    parser.add_argument(
+        "--enable_thinking",
+        action="store_true",
+        default=False,
+        help="Enable thinking mode in chat template",
+    )
 
     # Output configuration
     parser.add_argument(
@@ -186,9 +192,7 @@ def parse_args():
 def build_gsm8k_prompt(question: str) -> str:
     """Format a GSM8K question with the unified evaluator math template."""
     template = (
-        "Solve the following math problem step by step. The last line of your response should be of the form Answer: $ANSWER (without quotes) where $ANSWER is the answer to the problem.\n\n"
-        "{question}\n\n"
-        "Remember to put your answer on its own line after \"Answer:\", and you do not need to use a \\boxed command."
+        "{question}"
     )
     return template.replace("{question}", question or "")
 
@@ -286,7 +290,7 @@ def save_partial_results_csv(partials, output_dir):
     if not partials:
         return
     os.makedirs(output_dir, exist_ok=True)
-    csv_path = os.path.join(output_dir, "Dolly_generated_results.csv")
+    csv_path = os.path.join(output_dir, "gsm8k_generated_results.csv")
     df = pd.DataFrame([p.__dict__ for p in partials])
     header = not os.path.exists(csv_path)
     df.to_csv(csv_path, mode="a", header=header, index=False)
@@ -353,7 +357,7 @@ def prepare_prompts(items, tokenizer=None, enable_thinking=False):
                     messages,
                     tokenize=False,
                     add_generation_prompt=True,
-                    enable_thinking=False,
+                    enable_thinking=enable_thinking,
                 )
             else:
                 # Fallback to simple formatting if tokenizer is not available
@@ -493,7 +497,7 @@ def concurrent_api_requests(args, items, prompts, item_ids, max_concurrent=10, s
     partial_buffer = []
     batch_start_time = time.time()
     
-    print(f"开始并发处理 {len(items)} 个样本，并发数: {max_concurrent}")
+    print(f"Starting concurrent processing of {len(items)} items with concurrency: {max_concurrent}")
     
     # Create a thread pool executor
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_concurrent) as executor:
@@ -505,7 +509,7 @@ def concurrent_api_requests(args, items, prompts, item_ids, max_concurrent=10, s
         
         # Process completed requests with detailed progress
         completed_count = 0
-        for future in tqdm(concurrent.futures.as_completed(future_to_item), total=len(future_to_item), desc="处理API请求"):
+        for future in tqdm(concurrent.futures.as_completed(future_to_item), total=len(future_to_item), desc="Processing API requests"):
             item_id, index = future_to_item[future]
             try:
                 result = future.result()
@@ -521,12 +525,12 @@ def concurrent_api_requests(args, items, prompts, item_ids, max_concurrent=10, s
                     remaining_items = len(items) - completed_count
                     estimated_remaining = avg_time_per_item * remaining_items
                     
-                    print(f"\n进度: {completed_count}/{len(items)} ({completed_count/len(items)*100:.1f}%)")
-                    print(f"已用时: {elapsed/60:.1f}分钟, 平均每样本: {avg_time_per_item:.2f}秒")
-                    print(f"预计剩余时间: {estimated_remaining/60:.1f}分钟")
+                    print(f"\nProgress: {completed_count}/{len(items)} ({completed_count/len(items)*100:.1f}%)")
+                    print(f"Elapsed time: {elapsed/60:.1f} minutes, Average per item: {avg_time_per_item:.2f} seconds")
+                    print(f"Estimated remaining time: {estimated_remaining/60:.1f} minutes")
                     if start_time:
                         total_elapsed = time.time() - start_time
-                        print(f"总用时: {total_elapsed/60:.1f}分钟")
+                        print(f"Total elapsed time: {total_elapsed/60:.1f} minutes")
                     print("-" * 40)
 
                 # Periodic partial save
@@ -543,9 +547,9 @@ def concurrent_api_requests(args, items, prompts, item_ids, max_concurrent=10, s
         partial_buffer = []
 
     batch_time = time.time() - batch_start_time
-    print(f"\n批次完成! 用时: {batch_time/60:.1f}分钟")
-    print(f"成功处理: {len(processed_items)}/{len(items)} 个样本")
-    print(f"平均处理速度: {len(processed_items)/(batch_time/60):.1f} 样本/分钟")
+    print(f"\nBatch completed! Time taken: {batch_time/60:.1f} minutes")
+    print(f"Successfully processed: {len(processed_items)}/{len(items)} items")
+    print(f"Average processing speed: {len(processed_items)/(batch_time/60):.1f} items/minute")
     
     return processed_items
 
@@ -579,7 +583,7 @@ def main():
     
     # Start timing
     start_time = time.time()
-    print(f"开始处理时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"Processing start time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 60)
     
     # Load Dolly dataset directly
@@ -596,12 +600,12 @@ def main():
     if items_to_load:
         print(f"Loading first {items_to_load} items from GSM8K dataset")
         dataset = load_dataset(args.dataset_path, "main")
-        dataset = dataset["train"]
+        dataset = dataset[args.split]
         dataset = dataset.select(range(items_to_load))
     else:
         print(f"Loading all items from GSM8K dataset")
         dataset = load_dataset(args.dataset_path, "main")
-        dataset = dataset["train"]
+        dataset = dataset[args.split]
     
     print(f"Loaded GSM8K dataset with {len(dataset)} items")
     
@@ -635,18 +639,18 @@ def main():
         print("No items to process!")
         return
 
-    print(f"处理 {len(items)} 个样本从 GSM8K 数据集")
-    print(f"输出目录: {args.output_dir}")
+    print(f"Processing {len(items)} items from GSM8K dataset")
+    print(f"Output directory: {args.output_dir}")
     print(f"API URL: {args.api_url}")
-    print(f"最大并发请求数: {args.max_concurrent_requests}")
-    print(f"预计批次数: {(len(items) + args.max_concurrent_requests - 1) // args.max_concurrent_requests}")
+    print(f"Max concurrent requests: {args.max_concurrent_requests}")
+    print(f"Estimated number of batches: {(len(items) + args.max_concurrent_requests - 1) // args.max_concurrent_requests}")
     print("=" * 60)
 
     # Initialize tokenizer (optional, for prompt formatting)
     tokenizer = initialize_tokenizer(args.model_path)
 
     # Prepare prompts
-    prompts, item_ids = prepare_prompts(items=items, tokenizer=tokenizer)
+    prompts, item_ids = prepare_prompts(items=items, tokenizer=tokenizer, enable_thinking=args.enable_thinking)
     print(f"Prepared {len(prompts)} prompts")
 
     # Process items using concurrent API requests
@@ -672,29 +676,29 @@ def main():
     end_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     
     print("\n" + "="*60)
-    print("🎉 处理完成！")
+    print("🎉 Processing completed!")
     print("="*60)
-    print(f"开始时间: {datetime.fromtimestamp(start_time).strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"结束时间: {end_time}")
-    print(f"总用时: {total_time/60:.1f}分钟 ({total_time:.1f}秒)")
-    print(f"纯处理用时: {processing_time/60:.1f}分钟 ({processing_time:.1f}秒)")
-    print(f"成功处理样本数: {len(processed_items)}")
-    print(f"处理成功率: {len(processed_items)/len(items)*100:.1f}%")
+    print(f"Start time: {datetime.fromtimestamp(start_time).strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"End time: {end_time}")
+    print(f"Total time: {total_time/60:.1f} minutes ({total_time:.1f} seconds)")
+    print(f"Pure processing time: {processing_time/60:.1f} minutes ({processing_time:.1f} seconds)")
+    print(f"Successfully processed items: {len(processed_items)}")
+    print(f"Processing success rate: {len(processed_items)/len(items)*100:.1f}%")
     if processed_items and total_time > 0:
-        print(f"平均每样本用时: {total_time/len(processed_items):.2f}秒")
-        print(f"整体处理速度: {len(processed_items)/(total_time/60):.1f} 样本/分钟")
-        print(f"纯处理速度: {len(processed_items)/(processing_time/60):.1f} 样本/分钟")
+        print(f"Average time per item: {total_time/len(processed_items):.2f} seconds")
+        print(f"Overall processing speed: {len(processed_items)/(total_time/60):.1f} items/minute")
+        print(f"Pure processing speed: {len(processed_items)/(processing_time/60):.1f} items/minute")
     
-    # 如果是处理完整数据集，给出预估
+    # If processing full dataset, provide estimation
     if not args.debug and not args.num_items:
-        print(f"\n📊 完整数据集处理统计:")
-        print(f"如果这是完整数据集的一部分，基于当前速度:")
+        print(f"\n📊 Full dataset processing statistics:")
+        print(f"If this is part of a full dataset, based on current speed:")
         if processed_items and total_time > 0:
             speed_per_minute = len(processed_items) / (total_time / 60)
-            # OpenHermes-2.5 大约有 100万+ 样本
+            # OpenHermes-2.5 has approximately 1M+ samples
             full_dataset_size = 1000000
             estimated_full_time = full_dataset_size / speed_per_minute
-            print(f"处理 100万样本 预计需要: {estimated_full_time/60:.1f}小时")
+            print(f"Processing 1M samples estimated to take: {estimated_full_time/60:.1f} hours")
     
     print("="*60)
 

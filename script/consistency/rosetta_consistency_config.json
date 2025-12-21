@@ -1,0 +1,31 @@
+{
+    "dataset": {
+        "type": "LLMGeneratedChatDataset",
+        "kwargs": {
+            "split": "train",
+            "max_word_count": 1024,
+            "num_samples": null,
+            "data_path": "../rosetta_train/local/teacher_datasets/gsm8k_qwen3_32b_output_test/dataset_finished"
+        }
+    },
+    "models": {
+        "slm": "Qwen/Qwen3-0.6B",
+        "llm": "Qwen/Qwen3-32B"
+    },
+    "rosetta": {
+        "checkpoints_dir": "../rosetta_train/local/checkpoints/include_response_proj_zero/final",
+        "include_response": true,
+        "is_do_alignment": false,
+        "alignment_strategy": "first"
+    },
+    "training": {
+        "device": "cuda",
+        "dtype": "bfloat16",
+        "max_length": 1024,
+        "max_samples": 100,
+        "trust_remote_code": false,
+        "print_every": 50,
+        "debug": true,
+        "debug_samples": 3
+    }
+}

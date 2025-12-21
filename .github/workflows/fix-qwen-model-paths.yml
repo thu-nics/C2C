@@ -1,0 +1,125 @@
+name: Fix Qwen Model Paths
+
+on:
+  push:
+    branches:
+      - '*'  # Run on all branches
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: write  # Needed to create commits
+  pull-requests: write  # Needed to comment on PRs
+
+jobs:
+  fix-paths:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch full history to compare commits
+          token: ${{ secrets.GITHUB_TOKEN }}
+          ref: ${{ github.event.pull_request.head.ref || github.ref }}  # Checkout PR branch for PRs
+
+      - name: Get changed files
+        id: changed-files
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            # For PRs, compare against base branch
+            BASE_SHA="${{ github.event.pull_request.base.sha }}"
+            HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+            echo "base=$BASE_SHA" >> $GITHUB_OUTPUT
+            echo "head=$HEAD_SHA" >> $GITHUB_OUTPUT
+          else
+            # For pushes, compare against previous commit
+            BASE_SHA="${{ github.event.before }}"
+            HEAD_SHA="${{ github.sha }}"
+            echo "base=$BASE_SHA" >> $GITHUB_OUTPUT
+            echo "head=$HEAD_SHA" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Find and fix model paths
+        id: fix-paths
+        run: |
+          BASE_SHA="${{ steps.changed-files.outputs.base }}"
+          HEAD_SHA="${{ steps.changed-files.outputs.head }}"
+          
+          # Get list of changed files
+          CHANGED_FILES=$(git diff --name-only --diff-filter=ACM "$BASE_SHA" "$HEAD_SHA" || echo "")
+          
+          if [ -z "$CHANGED_FILES" ]; then
+            echo "No changed files found"
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          # Check if any files contain the old path pattern
+          FILES_TO_FIX=""
+          while IFS= read -r file; do
+            if [ -f "$file" ] && grep -q "/share/public/public_models/Qwen3-" "$file" 2>/dev/null; then
+              FILES_TO_FIX="$FILES_TO_FIX $file"
+            fi
+          done <<< "$CHANGED_FILES"
+          
+          if [ -z "$FILES_TO_FIX" ]; then
+            echo "No files need fixing"
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          # Fix the paths in all matching files
+          FIXED_FILES=""
+          for file in $FILES_TO_FIX; do
+            if [ -f "$file" ]; then
+              # Replace /share/public/public_models/Qwen3-*B with Qwen/Qwen3-*B
+              # This handles both quoted and unquoted paths
+              sed -i 's|/share/public/public_models/Qwen3-\([0-9]*B\)|Qwen/Qwen3-\1|g' "$file"
+              git add "$file"
+              FIXED_FILES="$FIXED_FILES\n  - $file"
+            fi
+          done
+          
+          echo "has_changes=true" >> $GITHUB_OUTPUT
+          echo "fixed_files<<EOF" >> $GITHUB_OUTPUT
+          echo -e "$FIXED_FILES" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Commit fixes
+        if: steps.fix-paths.outputs.has_changes == 'true' && github.event_name == 'push'
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git commit -m "fix: Replace /share/public/public_models/Qwen3-*B with Qwen/Qwen3-*B
+
+          Automated fix for model path references"
+          git push
+
+      - name: Commit fixes to PR
+        if: steps.fix-paths.outputs.has_changes == 'true' && github.event_name == 'pull_request'
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git commit -m "fix: Replace /share/public/public_models/Qwen3-*B with Qwen/Qwen3-*B
+
+          Automated fix for model path references"
+          git push
+
+      - name: Comment on PR
+        if: steps.fix-paths.outputs.has_changes == 'true' && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fixedFiles = `${{ steps.fix-paths.outputs.fixed_files }}`;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `🔧 **Model Path Fix Applied**
+              
+              Found and automatically fixed references to \`/share/public/public_models/Qwen3-*B\` paths in the following files:
+              ${fixedFiles}
+              
+              These have been changed to use the \`Qwen/Qwen3-*B\` format instead. The fix has been committed to this PR.`
+            });
+

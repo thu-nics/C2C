@@ -862,74 +862,53 @@ class LLMGeneratedChatDataset(Dataset):
 
         input_text = sample.get('input_text', '') or ''
 
-        # Parse question and choices from input_text, which is expected to contain a
-        # "Choices:" section followed by labeled options like "A. ..."
-        def _parse_question_and_choices(text: str):
-            lines = (text or '').splitlines()
-            # Find the line index for "Choices:" (case-insensitive, ignoring spaces)
-            choices_idx = -1
-            for i, line in enumerate(lines):
-                if line.strip().lower().startswith('choices'):
-                    choices_idx = i
-                    break
-
-            if choices_idx == -1:
-                # Fallback: no explicit Choices header found
-                question_part = text.strip()
-                return question_part, ''
-
-            question_part = '\n'.join(lines[:choices_idx]).strip()
-
-            # Collect labeled choices until blank line or instruction-like line
-            collected = []
-            for raw in lines[choices_idx + 1:]:
-                s = raw.strip()
-                if not s:
-                    # Stop on first blank after having collected at least one choice
-                    if collected:
-                        break
-                    else:
-                        continue
-                lower = s.lower()
-                # Stop when hitting instruction section common in prompts
-                if lower.startswith('instructions:') or lower.startswith("let's ") or lower.startswith('you must'):
-                    break
-                # Accept formats like "A. ..." or "A) ..."
-                if len(s) >= 3 and s[0] in 'ABCDEFGHIJ' and s[1] in ').' and s[2] == ' ':
-                    collected.append(s)
+        # Extract question from the original prompt
+        # Original format: instruction paragraph + question paragraph + reminder paragraph
+        def _extract_question(text: str) -> str:
+            """Extract the question part from a math problem prompt.
+            
+            Expected format:
+            - First paragraph: instruction (e.g., "Solve the following math problem...")
+            - Middle paragraph(s): the actual question
+            - Last paragraph: reminder (e.g., "Remember to put your answer...")
+            """
+            if not text.strip():
+                return text.strip()
+            
+            # Split by double newlines (paragraphs)
+            paragraphs = [p.strip() for p in text.split('\n\n') if p.strip()]
+            
+            if len(paragraphs) <= 1:
+                # Single paragraph or no clear structure, return as is
+                return text.strip()
+            
+            # If we have multiple paragraphs, assume:
+            # - First paragraph is instruction
+            # - Last paragraph is reminder
+            # - Middle paragraphs are the question
+            if len(paragraphs) == 2:
+                # Two paragraphs: likely instruction + question, or question + reminder
+                # Check if first paragraph looks like an instruction
+                first_lower = paragraphs[0].lower()
+                if any(keyword in first_lower for keyword in ['solve', 'answer', 'problem', 'step by step', 'form answer']):
+                    # First is instruction, second is question
+                    return paragraphs[1]
                 else:
-                    # If we've started collecting and this line doesn't look like a choice, stop
-                    if collected:
-                        break
-                    # Otherwise ignore preamble noise
-                    continue
+                    # First is question, second is reminder
+                    return paragraphs[0]
+            else:
+                # Three or more paragraphs: first is instruction, last is reminder, middle is question
+                question_paragraphs = paragraphs[1:-1]
+                return '\n\n'.join(question_paragraphs)
+        
+        # question = _extract_question(input_text)
+        question = input_text
+        
+        # Apply new prompt template
+        new_template = "{question}"
+        filled_prompt = new_template.format(question=question)
 
-            choices_block = '\n'.join(collected).strip()
-            return question_part, choices_block
-
-        question, choices_block = _parse_question_and_choices(input_text)
-
-        # Rebuild user prompt using the evaluation CoT template
-        template = """Accurately answer the following question:
-
-{{question}}
-
-Choices:
-{{choices}}
-
-Instructions:
-- Carefully read the question and all options.
-- Let's think step by step and you must explain your reasoning briefly.
-- Then give the final answer.
-- Keep your response within 150 words."""
-
-        filled_prompt = (
-            template
-            .replace("{{question}}", question or '')
-            .replace("{{choices}}", choices_block or '')
-        )
-
-        user_prompt = filled_prompt.strip() + "\n"
+        user_prompt = filled_prompt.strip()
 
         assistant_response = sample['model_response']
 

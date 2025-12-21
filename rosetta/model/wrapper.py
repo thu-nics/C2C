@@ -47,7 +47,7 @@ class RosettaModel(nn.Module):
     """
     Drop in replacement for the standard transformers LLM models, like Qwen3ForCausalLM
     """
-    def __init__(self, model_list: List[PreTrainedModel], base_model_idx = 0, projector_list: List[Projector] = [], aggregator_list: List[nn.Module] = [], multi_source_fusion_mode: str = "parallel"):
+    def __init__(self, model_list: List[PreTrainedModel], base_model_idx = 0, projector_list: List[Projector] = [], aggregator_list: List[nn.Module] = [], include_response: bool = False, multi_source_fusion_mode: str = "parallel"):
         super().__init__()
         # model list: a list of model, model 0 by default is the base model
         # projector list: a list of projector
@@ -71,6 +71,7 @@ class RosettaModel(nn.Module):
         # Multi-source fusion mode: 
         # "sequential" (default): each source updates base cache iteratively
         # "parallel": all sources project from clean base cache, then sum projections
+        self.include_response = include_response
         if multi_source_fusion_mode not in ["sequential", "parallel"]:
             raise ValueError(f"multi_source_fusion_mode must be 'sequential' or 'parallel', got '{multi_source_fusion_mode}'")
         self.multi_source_fusion_mode = multi_source_fusion_mode
@@ -221,6 +222,177 @@ class RosettaModel(nn.Module):
         else:
             self.kv_cache_dict[target_model_idx][source_model_idx] = cache
 
+    @staticmethod
+    def _monkeypatch_qwen3_attention_forward(attn_module, new_k_cache, new_v_cache):
+        """
+        Monkeypatch Qwen3Attention.forward so that *current step* attention uses the
+        provided key/value (in cache space) before computing attention.
+
+        This avoids editing transformers' Qwen3 code while ensuring the modified KV
+        is used in the same forward pass (not just for the next token).
+
+        new_k_cache/new_v_cache: (B, kv_heads, q_len, head_dim) in the SAME space as
+        Qwen3Attention's key_states/value_states AFTER k_norm + RoPE (k) and reshape (v).
+        """
+        import types
+
+        # Lazy imports to avoid hard dependency at module import time
+        from transformers.models.qwen3.modeling_qwen3 import (  # type: ignore
+            apply_rotary_pos_emb,
+            eager_attention_forward,
+            ALL_ATTENTION_FUNCTIONS,
+        )
+
+        orig_forward = attn_module.forward
+
+        def patched_forward(
+            self,
+            hidden_states: torch.Tensor,
+            position_embeddings,
+            attention_mask: Optional[torch.Tensor],
+            past_key_value: Optional[Cache] = None,
+            cache_position: Optional[torch.LongTensor] = None,
+            **kwargs,
+        ):
+            # This is essentially Qwen3Attention.forward with one injection point.
+            input_shape = hidden_states.shape[:-1]
+            hidden_shape = (*input_shape, -1, self.head_dim)
+
+            query_states = self.q_norm(self.q_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
+            key_states = self.k_norm(self.k_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
+            value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+
+            cos, sin = position_embeddings
+            query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+
+            # === Injection point (before cache update & attention) ===
+            # Replace current-token key/value with provided cache-space tensors.
+            # Expect same shape as key_states/value_states at this moment:
+            # (B, kv_heads, q_len, head_dim)
+            if new_k_cache is not None and new_v_cache is not None:
+                # Only replace if compatible
+                if key_states.shape == new_k_cache.shape:
+                    key_states = new_k_cache
+                if value_states.shape == new_v_cache.shape:
+                    value_states = new_v_cache
+
+            if past_key_value is not None:
+                cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+                key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+
+            attention_interface = eager_attention_forward
+            if self.config._attn_implementation != "eager":
+                if self.config._attn_implementation == "sdpa" and kwargs.get("output_attentions", False):
+                    # fall back to eager, same as upstream behavior (warning omitted here)
+                    attention_interface = eager_attention_forward
+                else:
+                    attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
+
+            attn_output, attn_weights = attention_interface(
+                self,
+                query_states,
+                key_states,
+                value_states,
+                attention_mask,
+                dropout=0.0 if not self.training else self.attention_dropout,
+                scaling=self.scaling,
+                sliding_window=self.sliding_window,
+                **kwargs,
+            )
+
+            attn_output = attn_output.reshape(*input_shape, -1).contiguous()
+            attn_output = self.o_proj(attn_output)
+            return attn_output, attn_weights
+
+        attn_module.forward = types.MethodType(patched_forward, attn_module)
+        return orig_forward
+
+    def register_hooks(self, input_ids, attention_mask, position_ids, base_kv_cache, source_model_idx, source_kv_cache):
+
+        base_kv_copy = clone_kv_cache(base_kv_cache)
+        source_kv_copy = clone_kv_cache(source_kv_cache)
+
+        new_length = input_ids.shape[1]
+
+        base_output_kv_cache = self.model_list[self.base_model_idx].forward(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask, 
+                    position_ids=position_ids,
+                    past_key_values=base_kv_copy,
+                    labels=None,
+                    use_cache=True, 
+                ).past_key_values
+        source_output_kv_cache = self.model_list[source_model_idx].forward(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask, 
+                    position_ids=position_ids,
+                    past_key_values=source_kv_copy,
+                    labels=None,
+                    use_cache=True, 
+                ).past_key_values
+        
+        for target_layer_idx, entry in self.projector_dict[self.base_model_idx][source_model_idx].items():
+            base_key_cache, base_value_cache = base_output_kv_cache[target_layer_idx]
+            new_base_key_cache = base_key_cache[:, :, -new_length:, :]
+            new_base_value_cache = base_value_cache[:, :, -new_length:, :]
+            new_base_kv_cache = (new_base_key_cache, new_base_value_cache)
+
+            pair_list = entry
+
+            projected_kv_list = []
+            source_kv_list = []
+            for source_model_layer_idx, projector_idx in pair_list:
+                source_key_cache, source_value_cache = source_output_kv_cache[source_model_layer_idx]
+                new_source_key_cache = source_key_cache[:, :, -new_length:, :]
+                new_source_value_cache = source_value_cache[:, :, -new_length:, :]
+                new_source_kv_cache = (new_source_key_cache, new_source_value_cache)
+                projected_key, projected_value = self.projector_list[projector_idx].forward(
+                    new_source_kv_cache, # tuple of (key, value), each of shape (B, N, H, D)
+                    new_base_kv_cache
+                )
+                projected_kv_list.append((projected_key, projected_value))
+                source_kv_list.append(new_source_kv_cache)
+
+            # Aggregate (fallback to first projector if no aggregator is available)
+            use_aggregator = (
+                len(projected_kv_list) > 1 and
+                len(self.aggregator_list) > 0 and
+                self.base_model_idx in self.aggregator_dict and
+                source_model_idx in self.aggregator_dict[self.base_model_idx] and
+                target_layer_idx in self.aggregator_dict[self.base_model_idx][source_model_idx]
+            )
+
+            if use_aggregator:
+                aggregator_idx = self.aggregator_dict[self.base_model_idx][source_model_idx][target_layer_idx]
+                agg_key, agg_value = self.aggregator_list[aggregator_idx].forward(
+                    source_kv_list,
+                    new_base_kv_cache,
+                    projected_kv_list
+                )
+            else:
+                # Fallback to first projector result when no aggregator is available
+                agg_key, agg_value = projected_kv_list[0]
+
+            # Update cache
+            base_output_kv_cache.key_cache[target_layer_idx][:, :, -new_length:, :] = agg_key
+            base_output_kv_cache.value_cache[target_layer_idx][:, :, -new_length:, :] = agg_value
+
+        # Monkeypatch attention forward so the modified KV is used in *this* forward pass.
+        hook_handlers = []  # list of (attn_module, orig_forward)
+        for i in range(self.model_list[self.base_model_idx].config.num_hidden_layers):
+            attn = self.model_list[self.base_model_idx].model.layers[i].self_attn
+            new_k = base_output_kv_cache.key_cache[i][:, :, -new_length:, :]
+            new_v = base_output_kv_cache.value_cache[i][:, :, -new_length:, :]
+            orig_forward = RosettaModel._monkeypatch_qwen3_attention_forward(attn, new_k, new_v)
+            hook_handlers.append((attn, orig_forward))
+
+        return hook_handlers, base_output_kv_cache, source_output_kv_cache
+    
+    def remove_hooks(self, hook_handlers):
+        # Restore monkeypatched forwards
+        for attn, orig_forward in hook_handlers:
+            attn.forward = orig_forward
+
     def forward(
         self,
         kv_cache_index: Optional[List] = None,
@@ -285,28 +457,54 @@ class RosettaModel(nn.Module):
                 prefill_position_ids = position_ids[:, start:end] if position_ids is not None else None
                 prefill_labels = labels[:, start:end] if labels is not None else None
 
-                output = self.model_list[self.base_model_idx].forward(
-                    input_ids=prefill_input_ids,
-                    attention_mask=prefill_attention_mask, 
-                    position_ids=prefill_position_ids,
-                    past_key_values=curr_base_kv_cache,
-                    labels=prefill_labels,
-                    use_cache=use_cache, 
-                    output_attentions=output_attentions,
-                    output_hidden_states=output_hidden_states,
-                    *args,
-                    **kwargs
-                )
+                if i == num_sections - 1:
 
-                if self.base_model_idx not in self.kv_cache_dict:
-                    self.kv_cache_dict[self.base_model_idx] = {}
-                if self.base_model_idx not in self.kv_cache_dict[self.base_model_idx]:
-                    self.kv_cache_dict[self.base_model_idx][self.base_model_idx] = None
-                self.kv_cache_dict[self.base_model_idx][self.base_model_idx] = output.past_key_values
+                    if self.include_response:
+                        hook_handlers, base_output_kv_cache, source_output_kv_cache = self.register_hooks(input_ids=prefill_input_ids, attention_mask=prefill_attention_mask, position_ids=prefill_position_ids,
+                                                            base_kv_cache=self.kv_cache_dict[self.base_model_idx][self.base_model_idx],
+                                                            source_model_idx=1, 
+                                                            source_kv_cache=self.kv_cache_dict[self.base_model_idx][1])
 
-                curr_base_kv_cache: DynamicCache = output.past_key_values
+                    # calculate target model kvcache
+                    output = self.model_list[self.base_model_idx].forward(
+                        input_ids=prefill_input_ids,
+                        attention_mask=prefill_attention_mask, 
+                        position_ids=prefill_position_ids,
+                        past_key_values=curr_base_kv_cache,
+                        labels=prefill_labels,
+                        use_cache=use_cache, 
+                        output_attentions=output_attentions,
+                        output_hidden_states=output_hidden_states,
+                        *args,
+                        **kwargs
+                    )
 
-                if i != num_sections - 1:
+                    if self.include_response:
+                        self.remove_hooks(hook_handlers)
+
+                else:
+
+                    output = self.model_list[self.base_model_idx].forward(
+                        input_ids=prefill_input_ids,
+                        attention_mask=prefill_attention_mask, 
+                        position_ids=prefill_position_ids,
+                        past_key_values=curr_base_kv_cache,
+                        labels=prefill_labels,
+                        use_cache=use_cache, 
+                        output_attentions=output_attentions,
+                        output_hidden_states=output_hidden_states,
+                        *args,
+                        **kwargs
+                    )
+
+                    if self.base_model_idx not in self.kv_cache_dict:
+                        self.kv_cache_dict[self.base_model_idx] = {}
+                    if self.base_model_idx not in self.kv_cache_dict[self.base_model_idx]:
+                        self.kv_cache_dict[self.base_model_idx][self.base_model_idx] = None
+                    self.kv_cache_dict[self.base_model_idx][self.base_model_idx] = output.past_key_values
+
+                    curr_base_kv_cache: DynamicCache = output.past_key_values
+                
                     for source_model_idx in range(1, len(self.model_list)):
                         if self.base_model_idx not in self.kv_cache_dict:
                             self.kv_cache_dict[self.base_model_idx] = {}
@@ -353,91 +551,94 @@ class RosettaModel(nn.Module):
                         curr_source_kv_cache = hybrid_to_dynamic(curr_source_kv_cache)
                         self.kv_cache_dict[self.base_model_idx][source_model_idx] = curr_source_kv_cache
 
-                # calculate source model kvcache and apply projections
-                if self.base_model_idx in self.projector_dict:
-                    sharer_mask = kv_cache_index[i][0][0][0].item()
-                    if sharer_mask > 0:
-                        base_cache = clone_kv_cache(curr_base_kv_cache)
-                        parallel_delta_cache = {} if self.multi_source_fusion_mode == "parallel" else None
-                        
-                        # Compute and apply projections for selected sharers (bitmask)
-                        for source_model_idx in self.projector_dict[self.base_model_idx].keys():
-                            # Check if this sharer is selected: bit (source_model_idx - 1)
-                            if not (sharer_mask & (1 << (source_model_idx - 1))):
-                                continue
-                            if self.multi_source_fusion_mode == "sequential":
-                                base_cache_ref = curr_base_kv_cache
-                            else:
-                                # Parallel: always project from the clean cloned base cache
-                                base_cache_ref = base_cache
+                    # calculate source model kvcache and apply projections
+                    if self.base_model_idx in self.projector_dict:
+                        # Iterate over all source models in projector_dict
+                        sharer_mask = kv_cache_index[i][0][0][0].item()
+                        if sharer_mask > 0:
+                            base_cache = clone_kv_cache(curr_base_kv_cache)
 
-                            for target_layer_idx, entry in self.projector_dict[self.base_model_idx][source_model_idx].items():
-                                # Get base KV cache slice for projection
-                                base_key_cache, base_value_cache = base_cache_ref[target_layer_idx]
-                                new_base_key_cache = base_key_cache[:, :, start:end, :]
-                                new_base_value_cache = base_value_cache[:, :, start:end, :]
-                                new_base_kv_cache = (new_base_key_cache, new_base_value_cache)
-
-                                pair_list = entry
-
-                                projected_kv_list = []
-                                source_kv_list = []
-                                for source_model_layer_idx, projector_idx in pair_list:
-                                    source_key_cache, source_value_cache = self.kv_cache_dict[self.base_model_idx][source_model_idx][source_model_layer_idx]
-                                    new_source_key_cache = source_key_cache[:, :, start:end, :]
-                                    new_source_value_cache = source_value_cache[:, :, start:end, :]
-                                    new_source_kv_cache = (new_source_key_cache, new_source_value_cache)
-                                    projected_key, projected_value = self.projector_list[projector_idx].forward(
-                                        new_source_kv_cache,
-                                        new_base_kv_cache
-                                    )
-                                    projected_kv_list.append((projected_key, projected_value))
-                                    source_kv_list.append(new_source_kv_cache)
-
-                                # Aggregate within this source (if multiple projectors per source)
-                                use_aggregator = (
-                                    len(projected_kv_list) > 1 and
-                                    len(self.aggregator_list) > 0 and
-                                    self.base_model_idx in self.aggregator_dict and
-                                    source_model_idx in self.aggregator_dict[self.base_model_idx] and
-                                    target_layer_idx in self.aggregator_dict[self.base_model_idx][source_model_idx]
-                                )
-
-                                if use_aggregator:
-                                    aggregator_idx = self.aggregator_dict[self.base_model_idx][source_model_idx][target_layer_idx]
-                                    agg_key, agg_value = self.aggregator_list[aggregator_idx].forward(
-                                        source_kv_list,
-                                        new_base_kv_cache,
-                                        projected_kv_list
-                                    )
-                                else:
-                                    agg_key, agg_value = projected_kv_list[0]
-
-                                # Collect or apply projection based on mode
+                            # For parallel mode, accumulate residuals for each target layer
+                            parallel_delta_cache = {} if self.multi_source_fusion_mode == "parallel" else None
+                            
+                            # Compute and apply projections (shared logic for both modes)
+                            for source_model_idx in self.projector_dict[self.base_model_idx].keys():
+                                # Check if this sharer is selected: bit (source_model_idx - 1)
+                                if not (sharer_mask & (1 << (source_model_idx - 1))):
+                                    continue
                                 if self.multi_source_fusion_mode == "sequential":
-                                    # Sequential: apply immediately so next source sees updated cache
-                                    curr_base_kv_cache.key_cache[target_layer_idx][:, :, start:end, :] = agg_key
-                                    curr_base_kv_cache.value_cache[target_layer_idx][:, :, start:end, :] = agg_value
+                                    base_cache_ref = curr_base_kv_cache
                                 else:
-                                    # Parallel: accumulate residuals (agg - base) for this target layer
-                                    if target_layer_idx not in parallel_delta_cache:
-                                        parallel_delta_cache[target_layer_idx] = (
-                                            torch.zeros_like(new_base_key_cache),
-                                            torch.zeros_like(new_base_value_cache),
-                                        )
-                                    delta_key, delta_value = parallel_delta_cache[target_layer_idx]
-                                    delta_key = delta_key + (agg_key - new_base_key_cache)
-                                    delta_value = delta_value + (agg_value - new_base_value_cache)
-                                    parallel_delta_cache[target_layer_idx] = (delta_key, delta_value)
+                                    # Parallel: always project from the clean cloned base cache
+                                    base_cache_ref = base_cache
 
-                        # For parallel mode, apply all accumulated residuals in one shot
-                        if self.multi_source_fusion_mode == "parallel":
-                            for target_layer_idx, (delta_key, delta_value) in parallel_delta_cache.items():
-                                base_key_cache, base_value_cache = base_cache[target_layer_idx]
-                                base_key_slice = base_key_cache[:, :, start:end, :]
-                                base_value_slice = base_value_cache[:, :, start:end, :]
-                                curr_base_kv_cache.key_cache[target_layer_idx][:, :, start:end, :] = base_key_slice + delta_key
-                                curr_base_kv_cache.value_cache[target_layer_idx][:, :, start:end, :] = base_value_slice + delta_value
+                                for target_layer_idx, entry in self.projector_dict[self.base_model_idx][source_model_idx].items():
+                                    # Get base KV cache slice for projection
+                                    base_key_cache, base_value_cache = base_cache_ref[target_layer_idx]
+                                    new_base_key_cache = base_key_cache[:, :, start:end, :]
+                                    new_base_value_cache = base_value_cache[:, :, start:end, :]
+                                    new_base_kv_cache = (new_base_key_cache, new_base_value_cache)
+
+                                    pair_list = entry
+
+                                    projected_kv_list = []
+                                    source_kv_list = []
+                                    for source_model_layer_idx, projector_idx in pair_list:
+                                        source_key_cache, source_value_cache = self.kv_cache_dict[self.base_model_idx][source_model_idx][source_model_layer_idx]
+                                        new_source_key_cache = source_key_cache[:, :, start:end, :]
+                                        new_source_value_cache = source_value_cache[:, :, start:end, :]
+                                        new_source_kv_cache = (new_source_key_cache, new_source_value_cache)
+                                        projected_key, projected_value = self.projector_list[projector_idx].forward(
+                                            new_source_kv_cache,
+                                            new_base_kv_cache
+                                        )
+                                        projected_kv_list.append((projected_key, projected_value))
+                                        source_kv_list.append(new_source_kv_cache)
+
+                                    # Aggregate within this source (if multiple projectors per source)
+                                    use_aggregator = (
+                                        len(projected_kv_list) > 1 and
+                                        len(self.aggregator_list) > 0 and
+                                        self.base_model_idx in self.aggregator_dict and
+                                        source_model_idx in self.aggregator_dict[self.base_model_idx] and
+                                        target_layer_idx in self.aggregator_dict[self.base_model_idx][source_model_idx]
+                                    )
+
+                                    if use_aggregator:
+                                        aggregator_idx = self.aggregator_dict[self.base_model_idx][source_model_idx][target_layer_idx]
+                                        agg_key, agg_value = self.aggregator_list[aggregator_idx].forward(
+                                            source_kv_list,
+                                            new_base_kv_cache,
+                                            projected_kv_list
+                                        )
+                                    else:
+                                        agg_key, agg_value = projected_kv_list[0]
+
+                                    # Collect or apply projection based on mode
+                                    if self.multi_source_fusion_mode == "sequential":
+                                        # Sequential: apply immediately so next source sees updated cache
+                                        curr_base_kv_cache.key_cache[target_layer_idx][:, :, start:end, :] = agg_key
+                                        curr_base_kv_cache.value_cache[target_layer_idx][:, :, start:end, :] = agg_value
+                                    else:
+                                        # Parallel: accumulate residuals (agg - base) for this target layer
+                                        if target_layer_idx not in parallel_delta_cache:
+                                            parallel_delta_cache[target_layer_idx] = (
+                                                torch.zeros_like(new_base_key_cache),
+                                                torch.zeros_like(new_base_value_cache),
+                                            )
+                                        delta_key, delta_value = parallel_delta_cache[target_layer_idx]
+                                        delta_key = delta_key + (agg_key - new_base_key_cache)
+                                        delta_value = delta_value + (agg_value - new_base_value_cache)
+                                        parallel_delta_cache[target_layer_idx] = (delta_key, delta_value)
+
+                            # For parallel mode, apply all accumulated residuals in one shot
+                            if self.multi_source_fusion_mode == "parallel":
+                                for target_layer_idx, (delta_key, delta_value) in parallel_delta_cache.items():
+                                    base_key_cache, base_value_cache = base_cache[target_layer_idx]
+                                    base_key_slice = base_key_cache[:, :, start:end, :]
+                                    base_value_slice = base_value_cache[:, :, start:end, :]
+                                    curr_base_kv_cache.key_cache[target_layer_idx][:, :, start:end, :] = base_key_slice + delta_key
+                                    curr_base_kv_cache.value_cache[target_layer_idx][:, :, start:end, :] = base_value_slice + delta_value
 
                     output.past_key_values = curr_base_kv_cache
                                                                              
