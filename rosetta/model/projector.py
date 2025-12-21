@@ -887,6 +887,7 @@ class C2CProjector(Projector):
         final_temperature: float = 0.001,
         anneal_steps: int = 1929,
         dtype: torch.dtype = torch.float32,
+        zero_init: bool = False
     ):
         super().__init__()
 
@@ -921,10 +922,13 @@ class C2CProjector(Projector):
         self.value_proj_mlp2 = RegularMLP(hidden_dim=hidden_dim, intermediate_dim=intermediate_dim, num_layers=num_layers-2, dropout=dropout, dtype=dtype)
         self.key_proj_out = nn.Linear(hidden_dim, out_dim, bias=True, dtype=dtype)
         self.value_proj_out = nn.Linear(hidden_dim, out_dim, bias=True, dtype=dtype)
-        nn.init.zeros_(self.key_proj_out.weight)
-        nn.init.zeros_(self.key_proj_out.bias)
-        nn.init.zeros_(self.value_proj_out.weight)
-        nn.init.zeros_(self.value_proj_out.bias)
+        
+        if zero_init:
+            print("Initializing projector weights to zero")
+            nn.init.zeros_(self.key_proj_out.weight)
+            nn.init.zeros_(self.key_proj_out.bias)
+            nn.init.zeros_(self.value_proj_out.weight)
+            nn.init.zeros_(self.value_proj_out.bias)
         
         # Scalar key/value gate parameters and temperature schedule
         self.key_gate_logit = nn.Parameter(torch.tensor(0.0, dtype=dtype))

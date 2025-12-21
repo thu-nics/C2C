@@ -23,3 +23,5 @@ script/analysis/oracle/
 run.sh
 test.py
 script/train/SFT_train_debug.py
+AGENTS.md
+package-lock.json
