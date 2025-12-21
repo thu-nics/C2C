@@ -10,7 +10,7 @@
     },
     "models": {
         "slm": "Qwen/Qwen3-0.6B",
-        "llm": "/share/public/public_models/Qwen3-32B"
+        "llm": "Qwen/Qwen3-32B"
     },
     "rosetta": {
         "checkpoints_dir": "../rosetta_train/local/checkpoints/include_response_proj_zero/final",

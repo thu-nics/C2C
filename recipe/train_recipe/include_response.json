@@ -1,7 +1,7 @@
 {
     "model": {
         "base_model": "Qwen/Qwen3-0.6B",
-        "teacher_model": "/share/public/public_models/Qwen3-32B",
+        "teacher_model": "Qwen/Qwen3-32B",
         "include_response": true,
         "is_do_alignment": false,
         "alignment_strategy": "first",

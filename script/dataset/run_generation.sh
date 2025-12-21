@@ -6,7 +6,7 @@
 echo "🚀 Starting dataset generation..."
 
 python script/dataset/create/create_gsm8k.py \
-    --model_path "/share/public/public_models/Qwen3-32B" \
+    --model_path "Qwen/Qwen3-32B" \
     --api_url "http://localhost:30000/v1" \
     --dataset_path "openai/gsm8k" \
     --output_dir "local/teacher_datasets/gsm8k_qwen3_32b_output_test" \
