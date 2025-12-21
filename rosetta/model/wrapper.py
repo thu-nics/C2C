@@ -457,7 +457,7 @@ class RosettaModel(nn.Module):
                 prefill_position_ids = position_ids[:, start:end] if position_ids is not None else None
                 prefill_labels = labels[:, start:end] if labels is not None else None
 
-                if i == num_sections -1:
+                if i == num_sections - 1:
 
                     if self.include_response:
                         hook_handlers, base_output_kv_cache, source_output_kv_cache = self.register_hooks(input_ids=prefill_input_ids, attention_mask=prefill_attention_mask, position_ids=prefill_position_ids,
@@ -554,7 +554,8 @@ class RosettaModel(nn.Module):
                     # calculate source model kvcache and apply projections
                     if self.base_model_idx in self.projector_dict:
                         # Iterate over all source models in projector_dict
-                        if kv_cache_index[i][0][0][0].item() != -1:
+                        sharer_mask = kv_cache_index[i][0][0][0].item()
+                        if sharer_mask > 0:
                             base_cache = clone_kv_cache(curr_base_kv_cache)
 
                             # For parallel mode, accumulate residuals for each target layer
@@ -562,6 +563,9 @@ class RosettaModel(nn.Module):
                             
                             # Compute and apply projections (shared logic for both modes)
                             for source_model_idx in self.projector_dict[self.base_model_idx].keys():
+                                # Check if this sharer is selected: bit (source_model_idx - 1)
+                                if not (sharer_mask & (1 << (source_model_idx - 1))):
+                                    continue
                                 if self.multi_source_fusion_mode == "sequential":
                                     base_cache_ref = curr_base_kv_cache
                                 else:

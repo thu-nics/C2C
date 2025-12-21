@@ -18,31 +18,29 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from rosetta.train.dataset_adapters import create_dataset
-from rosetta.utils.evaluate import load_rosetta_model, set_default_chat_template
-
-os.environ["CUDA_VISIBLE_DEVICES"] = "7"
+from rosetta.utils.evaluate import load_rosetta_model
 
 def load_config(config_path: str) -> Dict[str, Any]:
     """Load configuration from JSON file"""
     if not os.path.exists(config_path):
-        raise FileNotFoundError(f"配置文件不存在: {config_path}")
+        raise FileNotFoundError(f"Config file not found: {config_path}")
     with open(config_path, "r", encoding="utf-8") as f:
         return json.load(f)
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="计算Rosetta模型与LLM的label一致性")
+    parser = argparse.ArgumentParser(description="Compute label consistency between Rosetta model and LLM")
     parser.add_argument("--config", type=str, default="consistency_scripts/rosetta_consistency_config.json")
     args = parser.parse_args()
     
-    # 从配置文件读取所有配置
+    # Load all configurations from config file
     config = load_config(args.config)
     dataset_cfg = config.get("dataset", {})
     models_cfg = config.get("models", {})
     training_cfg = config.get("training", {})
     rosetta_cfg = config.get("rosetta", {})
     
-    # 构建配置
+    # Build configuration
     defaults = {
         "dataset_type": dataset_cfg.get("type"),
         "dataset_kwargs": dataset_cfg.get("kwargs", {}),
@@ -58,12 +56,12 @@ def parse_args() -> argparse.Namespace:
         "max_samples": training_cfg.get("max_samples"),
         "trust_remote_code": training_cfg.get("trust_remote_code", False),
         "print_every": training_cfg.get("print_every", 50),
-        # 优先使用命令行参数，如果命令行未指定则使用配置文件
+        # Prefer command line arguments, use config file if not specified
         "debug": training_cfg.get("debug", False),
         "debug_samples": training_cfg.get("debug_samples", 3),
     }
     
-    # 转换为 Namespace
+    # Convert to Namespace
     return argparse.Namespace(**defaults)
 
 
@@ -81,7 +79,7 @@ def build_plain_inputs(
     device: torch.device,
     max_length: int,
 ) -> Optional[Dict[str, torch.Tensor]]:
-    """构建tokenizer的输入，并返回label起止位置。"""
+    """Build tokenizer inputs and return label start/end positions."""
     instr_text = tokenizer.apply_chat_template(
         messages[:-1],
         tokenize=False,
@@ -119,21 +117,21 @@ def build_plain_inputs(
 
 def build_kv_cache_index(label_start: int, label_end: int, device: torch.device) -> List[torch.Tensor]:
     """
-    构建Rosetta模型所需的kv_cache_index。
+    Build kv_cache_index required by Rosetta model.
     
-    kv_cache_index是一个list，每个元素shape为(B, seq_len, 2):
-    - [1, 0]: 使用projector（从大模型投影到小模型的KV cache）
-    - [-1, 0]: 不使用projector（直接使用小模型）
+    kv_cache_index is a list, each element has shape (B, seq_len, 2):
+    - [1, 0]: Use projector (project KV cache from large model to small model)
+    - [-1, 0]: Don't use projector (directly use small model)
     
-    对于一致性检查：
-    - instruction部分使用 [1, 0] (使用rosetta投影)
-    - label部分使用 [-1, 0] (不使用投影，直接用小模型)
+    For consistency check:
+    - Instruction part uses [1, 0] (use rosetta projection)
+    - Label part uses [-1, 0] (no projection, directly use small model)
     """
-    # Instruction部分: 使用projector [1, 0]
+    # Instruction part: use projector [1, 0]
     instruction_length = label_start
     instruction_index = torch.tensor([1, 0], dtype=torch.long).repeat(instruction_length - 1, 1).unsqueeze(0).to(device)
     
-    # Label部分: 不使用projector [-1, 0]
+    # Label part: don't use projector [-1, 0]
     label_length = label_end - label_start
     label_index = torch.tensor([-1, 0], dtype=torch.long).repeat(label_length + 1, 1).unsqueeze(0).to(device)
     
@@ -142,11 +140,11 @@ def build_kv_cache_index(label_start: int, label_end: int, device: torch.device)
 
 def greedy_from_logits(logits: torch.Tensor, label_start: int, label_end: int) -> torch.Tensor:
     """
-    从logits中取label段的贪心预测。
+    Extract greedy predictions for label segment from logits.
     logits: [1, seq_len, vocab]
-    返回: [label_len]
+    Returns: [label_len]
     """
-    shift_logits = logits[:, :-1, :]  # 对齐input_ids[:, 1:]
+    shift_logits = logits[:, :-1, :]  # Align with input_ids[:, 1:]
     start = max(label_start - 1, 0)
     end = max(label_end - 1, start)
     return shift_logits[0, start:end].argmax(dim=-1)
@@ -161,7 +159,7 @@ def compare_models(
     max_length: int,
     debug: bool = False,
 ) -> Tuple[int, int, int, int]:
-    """比较Rosetta模型、SLM与LLM在label段的贪心预测一致性。
+    """Compare greedy prediction consistency of Rosetta model, SLM and LLM on label segment.
     
     Returns:
         (rosetta_match, slm_match, total_len, rosetta_win_count)
@@ -173,15 +171,15 @@ def compare_models(
     label_start = inputs["label_start"]
     label_end = inputs["label_end"]
     
-    # 构建kv_cache_index
+    # Build kv_cache_index
     kv_cache_index = build_kv_cache_index(label_start, label_end, device)
     
-    # 构建position_ids
+    # Build position_ids
     seq_len = inputs["input_ids"].shape[1]
     position_ids = torch.arange(seq_len, dtype=torch.long, device=device).unsqueeze(0)
     
     with torch.inference_mode():
-        # 1. Rosetta模型forward
+        # 1. Rosetta model forward
         rosetta_output = rosetta_model(
             kv_cache_index=kv_cache_index,
             input_ids=inputs["input_ids"],
@@ -190,14 +188,14 @@ def compare_models(
         )
         rosetta_logits = rosetta_output.logits
         
-        # 2. LLM模型forward
+        # 2. LLM model forward
         llm_output = llm_model(
             input_ids=inputs["input_ids"],
             attention_mask=inputs["attention_mask"],
         )
         llm_logits = llm_output.logits
         
-        # 3. SLM (Base Model) forward - 直接使用Rosetta内部的base model
+        # 3. SLM (Base Model) forward - directly use base model inside Rosetta
         slm_model = rosetta_model.model_list[0]
         slm_output = slm_model(
             input_ids=inputs["input_ids"],
@@ -257,7 +255,7 @@ def compare_models(
             print(f"{i:<5} {repr(lbl_tok):<15} {repr(ros_tok):<15} {repr(slm_tok):<15} {repr(llm_tok):<15} {r_eq_l:<5} {s_eq_l:<5} {note}")
         print("="*80 + "\n")
 
-    # 假设使用相同分词器，长度一定相同
+    # Assuming same tokenizer is used, lengths must be the same
     length = len(rosetta_preds)
     if length == 0:
         return 0, 0, 0, 0
@@ -265,7 +263,7 @@ def compare_models(
     rosetta_match = sum(int(a == b) for a, b in zip(rosetta_preds, llm_preds))
     slm_match = sum(int(a == b) for a, b in zip(slm_preds, llm_preds))
     
-    # Rosetta Win: Rosetta对了，SLM错了
+    # Rosetta Win: Rosetta is correct, SLM is wrong
     rosetta_win = sum(int(r == l and s != l) for r, s, l in zip(rosetta_preds, slm_preds, llm_preds))
     
     return rosetta_match, slm_match, length, rosetta_win
@@ -276,9 +274,9 @@ def main() -> None:
     device = torch.device(args.device)
 
     dataset = create_dataset(args.dataset_type, **args.dataset_kwargs)
-    print(f"加载数据集: {args.dataset_type}, 条目数={len(dataset)}")
+    print(f"Loading dataset: {args.dataset_type}, entries={len(dataset)}")
 
-    # 构建Rosetta模型配置
+    # Build Rosetta model configuration
     model_config = {
         "model_name": "Rosetta",
         "rosetta_config": {
@@ -295,8 +293,8 @@ def main() -> None:
         "checkpoints_dir": args.checkpoints_dir
     }
     
-    # 加载Rosetta模型
-    print(f"加载Rosetta模型...")
+    # Load Rosetta model
+    print(f"Loading Rosetta model...")
     print(f"  - SLM: {args.slm}")
     print(f"  - LLM: {args.llm}")
     print(f"  - Checkpoints: {args.checkpoints_dir}")
@@ -304,10 +302,10 @@ def main() -> None:
     rosetta_model, tokenizer = load_rosetta_model(model_config, eval_config, device)
     rosetta_model.eval()
     
-    # 直接使用Rosetta模型内部的LLM，避免重复加载
-    # model_list[0] 是 SLM (base model)，model_list[1] 是 LLM (teacher model)
+    # Directly use LLM inside Rosetta model to avoid duplicate loading
+    # model_list[0] is SLM (base model), model_list[1] is LLM (teacher model)
     llm_model = rosetta_model.model_list[1]
-    print(f"使用Rosetta内部的LLM模型进行对比")
+    print(f"Using LLM model inside Rosetta for comparison")
 
     rosetta_match_count = 0
     slm_match_count = 0
@@ -318,7 +316,7 @@ def main() -> None:
     for idx in range(min(max_samples, len(dataset))):
         messages = dataset[idx]
         
-        # 调试模式：打印前 N 个样本
+        # Debug mode: print first N samples
         is_debug = args.debug and (idx < args.debug_samples)
         
         r_match, s_match, total, r_win = compare_models(
@@ -355,9 +353,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    # import debugpy
-    # debugpy.listen(5678)
-    # print("Waiting for debugger to attach...")
-    # debugpy.wait_for_client()
-    # print("Debugger attached")
     main()

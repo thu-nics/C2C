@@ -1,8 +1,9 @@
 """
-批量测试多个checkpoint的一致性
+Batch consistency evaluation across multiple checkpoints
 
-自动扫描指定目录下的所有checkpoint（checkpoint-10, checkpoint-20, ..., final），
-对每个checkpoint运行一致性检查，并记录结果。
+This script automatically scans a base directory for all checkpoints
+(e.g., checkpoint-10, checkpoint-20, ..., final), runs the consistency
+check for each checkpoint, and records the results.
 
 Usage:
     python batch_check_consistency.py --base-dir local/checkpoints/qwen3_0.6b+qwen3_32b_include --config rosetta_consistency_config.json
@@ -20,55 +21,55 @@ from datetime import datetime
 
 def find_checkpoints(base_dir: str) -> List[tuple]:
     """
-    查找所有checkpoint目录，返回排序后的列表。
+    Find all checkpoint directories and return a sorted list.
     
     Returns:
-        List of (checkpoint_name, checkpoint_path) tuples, sorted by checkpoint number
+        List of (checkpoint_name, checkpoint_path) tuples, sorted by checkpoint step.
     """
     base_path = Path(base_dir)
     if not base_path.exists():
-        raise FileNotFoundError(f"目录不存在: {base_dir}")
+        raise FileNotFoundError(f"Directory not found: {base_dir}")
     
     checkpoints = []
     
-    # 查找所有 checkpoint-* 目录
+    # Find all checkpoint-* directories
     for item in base_path.iterdir():
         if item.is_dir():
             name = item.name
-            # 匹配 checkpoint-数字 格式
+            # Match the "checkpoint-<number>" pattern
             match = re.match(r'checkpoint-(\d+)', name)
             if match:
                 step = int(match.group(1))
                 checkpoints.append((step, name, str(item)))
             elif name == "final":
-                # final 放在最后
+                # Put "final" at the end
                 checkpoints.append((float('inf'), name, str(item)))
     
-    # 按 step 排序
+    # Sort by step
     checkpoints.sort(key=lambda x: x[0])
     return [(name, path) for _, name, path in checkpoints]
 
 
 def run_consistency_check(config_path: str, checkpoint_dir: str, output_file: str = None) -> Dict[str, Any]:
     """
-    运行单个checkpoint的一致性检查。
+    Run consistency check for a single checkpoint.
     
     Args:
-        config_path: 基础配置文件路径
-        checkpoint_dir: checkpoint目录路径
-        output_file: 输出日志文件路径（追加写入）。会同时实时打印到终端。
+        config_path: Path to the base config JSON.
+        checkpoint_dir: Path to the checkpoint directory.
+        output_file: Output log file path (append). Output is also streamed to stdout.
     
     Returns:
-        简单的运行信息（是否成功、返回码）
+        Simple run info (success flag, return code).
     """
-    # 基础配置
+    # Base config
     with open(config_path, 'r', encoding='utf-8') as f:
         config = json.load(f)
 
-    # 更新checkpoint路径
+    # Update checkpoint path
     config['rosetta']['checkpoints_dir'] = checkpoint_dir
 
-    # 创建临时配置文件
+    # Create a temporary config file
     import tempfile
     script_dir = Path(__file__).parent
     check_script = script_dir / "check_rosetta_consistency.py"
@@ -77,7 +78,7 @@ def run_consistency_check(config_path: str, checkpoint_dir: str, output_file: st
         json.dump(config, tmp, indent=2, ensure_ascii=False)
         tmp_config_path = tmp.name
 
-    # 运行检查脚本：将 stdout/stderr 合并后逐行实时转发到终端与文件
+    # Run the check script: merge stdout/stderr and stream line-by-line to stdout and file
     import subprocess
     cmd = [sys.executable, str(check_script), "--config", tmp_config_path]
 
@@ -98,9 +99,9 @@ def run_consistency_check(config_path: str, checkpoint_dir: str, output_file: st
 
         assert proc.stdout is not None
         for line in proc.stdout:
-            # 实时打印到终端
+            # Stream to stdout
             print(line, end="")
-            # 同时写到文件
+            # Also write to file
             if log_fh:
                 log_fh.write(line)
                 log_fh.flush()
@@ -121,37 +122,37 @@ def run_consistency_check(config_path: str, checkpoint_dir: str, output_file: st
 
 
 def main():
-    parser = argparse.ArgumentParser(description="批量测试多个checkpoint的一致性")
+    parser = argparse.ArgumentParser(description="Batch consistency evaluation across multiple checkpoints")
     parser.add_argument("--base-dir", type=str, default="local/checkpoints/include_response_proj_zero")
     parser.add_argument("--config", type=str, default="rosetta_consistency_config.json",
-                       help="基础配置文件路径")
+                       help="Path to the base config JSON")
     parser.add_argument("--output", type=str, default=None,
-                       help="输出日志文件路径（原样追加写入），默认：base_dir/consistency_output.log")
+                       help="Output log file path (append as-is). Default: base_dir/consistency_output.log")
     
     args = parser.parse_args()
     
-    # 查找所有checkpoint
+    # Find all checkpoints
     checkpoints = find_checkpoints(args.base_dir)
     
     if not checkpoints:
-        print(f"❌ 在 {args.base_dir} 中未找到任何checkpoint")
+        print(f"❌ No checkpoints found in {args.base_dir}")
         return
     
-    print(f"📋 找到 {len(checkpoints)} 个checkpoint:")
+    print(f"📋 Found {len(checkpoints)} checkpoints:")
     for name, path in checkpoints:
         print(f"  - {name}")
     
-    # 设置输出路径
+    # Set output path
     if args.output is None:
         args.output = os.path.join(args.base_dir, "consistency_output.log")
     
-    # 运行测试
+    # Run batch tests
     start_time = datetime.now()
     
-    print(f"\n🚀 开始批量测试...")
-    print(f"📁 输出将同时打印到终端并追加写入: {args.output}\n")
+    print(f"\n🚀 Starting batch evaluation...")
+    print(f"📁 Output will be printed to stdout and appended to: {args.output}\n")
     
-    # 写入文件头
+    # Write file header
     with open(args.output, "a", encoding="utf-8") as f:
         f.write("\n" + "=" * 80 + "\n")
         f.write(f"[batch_check_consistency] start_time={start_time.isoformat()}\n")
