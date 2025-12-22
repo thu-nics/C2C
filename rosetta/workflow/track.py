@@ -684,3 +684,128 @@ def record_interaction(
         clean_messages.append(clean_msg)
 
     return tracker.record(clean_messages, llm_id=llm_id)
+
+
+@dataclass
+class TreeNode:
+    """A node in the tree structure."""
+    step_idx: int
+    parent_idx: Optional[int]
+    action: str  # execute, revise, rewind, answer
+    data: dict = field(default_factory=dict)
+    children: list[int] = field(default_factory=list)
+
+
+class TreeTracker:
+    """Tracks tree structure for tree-based research workflow."""
+
+    def __init__(self):
+        self._nodes: dict[int, TreeNode] = {}  # node_id -> TreeNode
+        self._rewinds: list[tuple[int, int, str]] = []  # (from_node_id, to_step_idx, summary)
+        self._current_path: list[int] = []  # list of node_ids in current execution path
+        self._step_to_node: dict[int, int] = {}  # step_idx -> node_id for execute nodes
+
+    def get_current_parent(self) -> Optional[int]:
+        """Return the node_id of the current parent (last node in path), or None if empty."""
+        return self._current_path[-1] if self._current_path else None
+
+    def add_node(self, node_id: int, parent_id: Optional[int], action: str, data: dict = None):
+        """Add a node to the tree.
+
+        Args:
+            node_id: Unique identifier for this node (monotonically increasing).
+            parent_id: Node ID of parent (None for root).
+            action: Action type (execute, revise, rewind, answer).
+            data: Associated data (task, tasks, answer, etc.).
+        """
+        node = TreeNode(
+            step_idx=node_id,  # Using node_id as step_idx for compatibility
+            parent_idx=parent_id,
+            action=action,
+            data=data or {}
+        )
+        self._nodes[node_id] = node
+
+        # Update parent's children
+        if parent_id is not None and parent_id in self._nodes:
+            self._nodes[parent_id].children.append(node_id)
+
+        # Update current path
+        self._current_path.append(node_id)
+
+    def mark_rewind(self, to_step_idx: int, summary: str):
+        """Record a rewind event and update current path.
+
+        Args:
+            to_step_idx: Step index to rewind to (execution position, not node_id).
+            summary: Summary of the failed path.
+        """
+        from_node_id = self._current_path[-1] if self._current_path else 0
+        self._rewinds.append((from_node_id, to_step_idx, summary))
+        # Find the node at to_step_idx and trim path to that point
+        if to_step_idx in self._step_to_node:
+            target_node_id = self._step_to_node[to_step_idx]
+            if target_node_id in self._current_path:
+                idx = self._current_path.index(target_node_id)
+                self._current_path = self._current_path[:idx + 1]
+
+    def register_step(self, step_idx: int, node_id: int):
+        """Register mapping from step_idx to node_id for execute nodes."""
+        self._step_to_node[step_idx] = node_id
+
+    def get_current_path(self) -> list[int]:
+        """Return the current path from root to current node."""
+        return list(self._current_path)
+
+    def get_node(self, step_idx: int) -> Optional[TreeNode]:
+        """Get node by step index."""
+        return self._nodes.get(step_idx)
+
+    def __str__(self) -> str:
+        """Return ASCII visualization of the tree."""
+        if not self._nodes:
+            return "TreeTracker: Empty"
+
+        lines = ["Tree Structure", "=" * 40]
+
+        def format_node(idx: int, prefix: str = "", is_last: bool = True) -> list[str]:
+            node = self._nodes.get(idx)
+            if not node:
+                return []
+
+            connector = "└── " if is_last else "├── "
+            data_str = ""
+            if node.action == "execute" and "task" in node.data:
+                data_str = f": {node.data['task'][:50]}..."
+            elif node.action == "answer" and "answer" in node.data:
+                data_str = f": {node.data['answer'][:50]}..."
+
+            result = [f"{prefix}{connector}[{idx}] {node.action}{data_str}"]
+
+            child_prefix = prefix + ("    " if is_last else "│   ")
+            for i, child_idx in enumerate(node.children):
+                is_child_last = (i == len(node.children) - 1)
+                result.extend(format_node(child_idx, child_prefix, is_child_last))
+
+            return result
+
+        # Find root nodes (nodes without parent or parent not in tree)
+        roots = [idx for idx, node in self._nodes.items()
+                 if node.parent_idx is None or node.parent_idx not in self._nodes]
+
+        for root_idx in sorted(roots):
+            lines.extend(format_node(root_idx, "", True))
+
+        if self._rewinds:
+            lines.append("")
+            lines.append("Rewinds:")
+            for from_node_id, to_step_idx, summary in self._rewinds:
+                lines.append(f"  node {from_node_id} → step {to_step_idx}: {summary[:60]}...")
+
+        lines.append("=" * 40)
+        lines.append(f"Nodes: {len(self._nodes)}, Rewinds: {len(self._rewinds)}")
+
+        return "\n".join(lines)
+
+    def __repr__(self) -> str:
+        return f"TreeTracker(nodes={len(self._nodes)}, rewinds={len(self._rewinds)})"

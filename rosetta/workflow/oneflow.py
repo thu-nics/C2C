@@ -8,8 +8,7 @@ from camel.types import OpenAIBackendRole
 
 from rosetta.workflow.track import InteractionTracker, record_interaction
 from rosetta.workflow.selector import ContextSelector
-from rosetta.workflow.prompt import SEARCH_TASK_DECOMPOSE_PROMPT, TASK_REVISE_PROMPT, FORCE_ANSWER_PROMPT
-from rosetta.workflow.prompt import SEARCH_AGENT_PROMPT_MIRO as SEARCH_AGENT_PROMPT
+from rosetta.workflow.prompt import SEARCH_TASK_DECOMPOSE_PROMPT, TASK_REVISE_PROMPT, FORCE_ANSWER_PROMPT, SEARCH_AGENT_PROMPT
 from rosetta.workflow.display import StatusLogger
 
 def _parse_tasks(text: str) -> list:
