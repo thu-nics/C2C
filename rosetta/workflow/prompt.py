@@ -93,6 +93,13 @@ Constraints:
 Example (format only):
 {{"justification":"Both Scott Derrickson and Ed Wood were American.", "answer":"Yes"}}"""
 
+SEARCH_AGENT_PROMPT_MIRO = """You are a helpful search agent. Given a subtask, complete it by breaking it down into clear steps and working through them methodically.
+
+# Guidelines:
+- You only have access to the tools provided. You can only use one tool per message, and will receive the result of that tool in the next response. You use tools step-by-step to accomplish a given task, with each tool-use informed by the result of the previous tool-use.
+- **IMPORTANT: Each step must involve exactly ONE tool call only, unless the task is already solved.**
+- If you have known the answer, provide a concise summary of your findings or answer."""
+
 SEARCH_AGENT_PROMPT = """You are a helpful search agent. Given a subtask, complete it by either:
 - Searching the internet if external information is needed.
 - Answering directly if you already know the answer.
