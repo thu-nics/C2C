@@ -46,8 +46,8 @@ class InteractionTracker:
             sort_by_llm_id: If True, __str__ sorts interaction rows by LLM ID.
         """
         self._pool: list[ContentElement] = []
-        self._content_to_uid: dict[tuple[str, str], int] = {}
         self._uuid_to_uid: dict[str, int] = {}  # MemoryRecord.uuid -> uid for cross-LLM alignment
+        self._content_to_uid: dict[tuple[str, str, Optional[str]], int] = {}
         self._interactions: list[tuple[int, int, list[int]]] = []  # (llm_id, response_uid, context_uids)
         self._edges: set[tuple[int, int]] = set()  # (from_uid, to_uid) for dependency graph
         self._tokenizer = tokenizer
@@ -83,7 +83,8 @@ class InteractionTracker:
             role = msg["role"]
             content = msg["content"]  # Content for matching (may be str(tool_calls))
             original_content = msg.get("original_content", content)  # Original content for retrieval
-            key = (role, content)
+            tool_call_id = msg.get("tool_call_id", None)
+            key = (role, content, tool_call_id)
 
             if key in self._content_to_uid:
                 uid = self._content_to_uid[key]
@@ -574,9 +575,10 @@ class InteractionTracker:
         """
         role = message.get("role", "")
         content = message.get("content", "")
+        tool_call_id = message.get("tool_call_id", None)
         if not content and "tool_calls" in message:
             content = str(message["tool_calls"])
-        return self._content_to_uid.get((role, content), -1)
+        return self._content_to_uid.get((role, content, tool_call_id), -1)
 
     def messages_to_uids(self, messages: list[dict]) -> list[int]:
         """Get UIDs for a list of message dicts.
