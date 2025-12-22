@@ -12,10 +12,12 @@ import json
 import multiprocessing as mp
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Optional, Callable
 
+import requests
 from datasets import load_dataset
 from transformers import AutoTokenizer
 from rich.progress import Progress, BarColumn, TextColumn, TimeElapsedColumn
@@ -269,15 +271,113 @@ def aggregate_results(process_dir: Path, output_path: Path, output_format: str) 
                     except json.JSONDecodeError:
                         continue
 
+    return total, correct
+
+
+def _evaluate_single_answer(rec: dict, api_url: str, model_type: str, prompt_template: str) -> tuple[dict, bool]:
+    """Evaluate a single answer via SGLang API."""
+    prompt = prompt_template.format(
+        question=rec["question"],
+        gold_answer=rec["gold_answer"],
+        pred_answer=rec["pred_answer"],
+    )
+
+    request_data = {
+        "model": model_type,
+        "messages": [
+            {"role": "system", "content": "You are an expert evaluator."},
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.0,
+        "max_tokens": 512,
+    }
+
+    try:
+        response = requests.post(api_url, json=request_data, timeout=60)
+        response.raise_for_status()
+        result = response.json()
+        content = result["choices"][0]["message"]["content"]
+        judgment = content.strip().upper()
+        is_correct = "YES" in judgment
+        rec["correct_llm"] = is_correct
+        return rec, is_correct
+    except Exception as e:
+        rec["correct_llm"] = False
+        return rec, False
+
+
+def llm_evaluate_answers(jsonl_path: Path, config: EvalConfig, max_workers: int = 32) -> tuple[int, int]:
+    """Use LLM to evaluate answer correctness with concurrent requests to SGLang backend."""
+    eval_prompt_template = """Question: {question}
+
+Gold Answer: {gold_answer}
+
+Predicted Answer: {pred_answer}
+
+Are these answers semantically equivalent? Consider:
+- Same factual information (even if worded differently)
+- Numerical equivalence
+- Paraphrasing
+
+Answer with ONLY 'YES' or 'NO'."""
+
+    # Read all records
+    records = []
+    with jsonl_path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                try:
+                    records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+
+    # Prepare records for evaluation
+    eval_records = [rec for rec in records if rec.get("error") is None]
+    for rec in records:
+        if rec.get("error") is not None:
+            rec["correct_llm"] = False
+
+    total_llm = len(eval_records)
+    correct_llm = 0
+    api_url = f"{config.model_url.rstrip('/')}/chat/completions"
+
+    # Concurrent evaluation (SGLang handles batching internally)
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(_evaluate_single_answer, rec, api_url, config.model_type, eval_prompt_template): rec
+            for rec in eval_records
+        }
+
+        for i, future in enumerate(as_completed(futures), 1):
+            try:
+                rec, is_correct = future.result()
+                correct_llm += int(is_correct)
+                if i % 10 == 0 or i == total_llm:
+                    print(f"LLM evaluation progress: {i}/{total_llm}")
+            except Exception as e:
+                print(f"Evaluation error: {e}")
+
+    # Write updated records
+    with jsonl_path.open("w", encoding="utf-8") as f:
+        for rec in records:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+    return total_llm, correct_llm
+
+
+def write_output_files(jsonl_path: Path, output_path: Path, output_format: str) -> None:
+    """Write final output files in requested format and CSV."""
     # Convert to JSON array if needed
     if output_format == "json":
-        _jsonl_to_json_array(final_jsonl, output_path)
+        _jsonl_to_json_array(jsonl_path, output_path)
 
     # Write CSV
     csv_path = output_path.with_suffix(".csv")
-    csv_fields = ["idx", "hotpot_id", "question", "gold_answer", "pred_answer", "pred_raw", "correct_em", "seconds", "error"]
+    csv_fields = ["idx", "hotpot_id", "question", "gold_answer", "pred_answer", "pred_raw",
+                  "correct_em", "correct_llm", "seconds", "error"]
 
-    with final_jsonl.open("r", encoding="utf-8") as fin, csv_path.open("w", encoding="utf-8", newline="") as fout:
+    with jsonl_path.open("r", encoding="utf-8") as fin, csv_path.open("w", encoding="utf-8", newline="") as fout:
         writer = csv.DictWriter(fout, fieldnames=csv_fields)
         writer.writeheader()
         for line in fin:
@@ -290,8 +390,6 @@ def aggregate_results(process_dir: Path, output_path: Path, output_format: str) 
                 writer.writerow(row)
             except json.JSONDecodeError:
                 continue
-
-    return total, correct
 
 
 def _jsonl_to_json_array(jsonl_path: Path, json_path: Path) -> None:
@@ -429,17 +527,33 @@ def main() -> None:
         p.join()
 
     # Aggregate results
-    total, correct = aggregate_results(process_dir, config.output, config.output_format)
+    total, correct_em = aggregate_results(process_dir, config.output, config.output_format)
+
+    # Determine JSONL path
+    if config.output_format == "jsonl":
+        final_jsonl = config.output
+    else:
+        final_jsonl = config.output.with_suffix(".jsonl")
+
+    # LLM-based evaluation
+    print("\nRunning LLM-based evaluation...")
+    total_llm, correct_llm = llm_evaluate_answers(final_jsonl, config)
+
+    # Write final output files with updated records
+    write_output_files(final_jsonl, config.output, config.output_format)
 
     # Write summary with configuration and prompts
-    acc = (correct / total) if total else 0.0
+    acc_em = (correct_em / total) if total else 0.0
+    acc_llm = (correct_llm / total_llm) if total_llm else 0.0
     csv_path = config.output.with_suffix(".csv")
 
     summary_lines = [
         "=" * 80,
         "EVALUATION SUMMARY",
         "=" * 80,
-        f"Results: evaluated={total} EM={correct} acc={acc:.3f}",
+        f"Results: evaluated={total}",
+        f"  Exact Match: EM={correct_em} acc={acc_em:.3f}",
+        f"  LLM Eval: correct={correct_llm} acc={acc_llm:.3f}",
         f"Output: {config.output}",
         f"CSV: {csv_path}",
         "",
@@ -504,7 +618,11 @@ def main() -> None:
     summary_path = config.output.parent / "summary.txt"
     summary_path.write_text("\n".join(summary_lines), encoding="utf-8")
 
-    print(f"Done. evaluated={total} EM={correct} acc={acc:.3f} output={config.output} csv={csv_path}")
+    print(f"\nDone. evaluated={total}")
+    print(f"  Exact Match: EM={correct_em} acc={acc_em:.3f}")
+    print(f"  LLM Eval: correct={correct_llm} acc={acc_llm:.3f}")
+    print(f"Output: {config.output}")
+    print(f"CSV: {csv_path}")
     print(f"Summary: {summary_path}")
 
 
