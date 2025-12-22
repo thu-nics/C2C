@@ -136,6 +136,8 @@ class HFQwenModel(BaseModelBackend):
         )
         self.enable_thinking = enable_thinking
         self._model_name = model_name_or_path
+
+        self.role = "main"
         
         super().__init__(
             model_type=model_name_or_path,
@@ -289,8 +291,8 @@ class HFContextAttentionQwenModel(HFQwenModel):
         if not msgs_norm or msgs_norm[-1].get("role") == "assistant":
             raise ValueError("messages must be non-empty and must not end with an assistant message.")
 
-        extra_body = self.model_config_dict.get("extra_body", {})
-        drop_messages = _normalize_drop_messages(extra_body.get("drop_messages"))
+        extra_body = self.model_config_dict.get("extra_body", {"main":{}, "search":{}})
+        drop_messages = _normalize_drop_messages(extra_body[self.role].get("drop_messages"))
 
         max_new_tokens = int(self.model_config_dict.get("max_tokens", 2048))
         temperature = float(self.model_config_dict.get("temperature", 0.7))

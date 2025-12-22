@@ -133,6 +133,7 @@ def do_research(
     main_contextual: ContextSelector = context_plan.get('main_contextual')
 
     # Initial decomposition
+    main_agent.model_backend.models[0].role = "main"
     response = main_agent.step(SEARCH_TASK_DECOMPOSE_PROMPT.format(content=question))
     record_interaction(tracker, main_agent.chat_history, llm_id=0)
     
@@ -150,8 +151,8 @@ def do_research(
         
         # Execute round with status display
         with logger.round(round_idx + 1, tasks):
-            search_agent = ChatAgent(system_message=SEARCH_AGENT_PROMPT, model=search_model, tools=[search_tool])
-            
+            search_agent = ChatAgent(system_message=SEARCH_AGENT_PROMPT, model=search_model, tools=[search_tool], summarize_threshold=None, step_timeout=3000)
+            search_agent.model_backend.models[0].role = "search"
             # Register tools for this search agent
             if tracker is not None:
                 tracker.register_tools(llm_id=round_idx + 1, tools=[search_tool])
@@ -171,8 +172,8 @@ def do_research(
             if search_contextual:
                 drop_msgs = _compute_drop_messages(forward_context, search_contextual, offset=1)
                 if "extra_body" not in search_model.model_config_dict:
-                    search_model.model_config_dict["extra_body"] = {}
-                search_model.model_config_dict["extra_body"]["drop_messages"] = drop_msgs
+                    search_model.model_config_dict["extra_body"] = {"main":{}, "search":{}}
+                search_model.model_config_dict["extra_body"]["search"]["drop_messages"] = drop_msgs
             
             search_agent.step(tasks[0])
             record_interaction(tracker, search_agent.chat_history, llm_id=round_idx + 1)
@@ -197,17 +198,19 @@ def do_research(
             if main_contextual:
                 drop_msgs = _compute_drop_messages(feedback_context, main_contextual, offset=main_offset)
                 if "extra_body" not in main_agent.model_backend.model_config_dict:
-                    main_agent.model_backend.model_config_dict["extra_body"] = {}
+                    main_agent.model_backend.model_config_dict["extra_body"] = {"main":{}, "search":{}}
                 # Accumulate drop_messages across rounds
-                existing_drops = main_agent.model_backend.model_config_dict["extra_body"].get("drop_messages", {})
+                existing_drops = main_agent.model_backend.model_config_dict["extra_body"]["main"].get("drop_messages", {})
                 existing_drops.update(drop_msgs)
-                main_agent.model_backend.model_config_dict["extra_body"]["drop_messages"] = existing_drops
+                main_agent.model_backend.model_config_dict["extra_body"]["main"]["drop_messages"] = existing_drops
             
+            main_agent.model_backend.models[0].role = "main"
             response = main_agent.step(TASK_REVISE_PROMPT.format(question=question))
             record_interaction(tracker, main_agent.chat_history, llm_id=0)
 
     # Force answer if no answer yet
     info = "\n\n".join(collected_info) if collected_info else "No information found."
+    main_agent.model_backend.models[0].role = "main"
     response = main_agent.step(FORCE_ANSWER_PROMPT.format(question=question, info=info))
     record_interaction(tracker, main_agent.chat_history, llm_id=0)
     answer = _parse_answer(response.msg.content)

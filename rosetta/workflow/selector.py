@@ -116,9 +116,15 @@ class ContextSelector:
         return [records[0], records[-1]], indices
 
     @staticmethod
-    def select_initial(records):
-        """Keep first three records: [records[0], records[1], records[2]]"""
+    def select_initial_with_system(records):
+        """Keep first two records: [records[0], records[1]]"""
         indices = [1, 2]
+        return [records[i] for i in indices], indices
+    
+    @staticmethod
+    def select_initial(records):
+        """Keep first two records: [records[1], records[2]]"""
+        indices = [0, 1]
         return [records[i] for i in indices], indices
 
     @staticmethod
