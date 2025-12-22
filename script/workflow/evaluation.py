@@ -100,7 +100,31 @@ def main() -> None:
     parser.add_argument("--model-type", default="contextual-model")
     parser.add_argument("--tokenizer", default="Qwen/Qwen3-32B")
     parser.add_argument("--mode", default="oneflow", choices=["oneflow", "single"])
-    args = parser.parse_args()  
+    parser.add_argument("--main_to_search", type=str, default="all", choices=["all", "initial", "none"])  # all
+    parser.add_argument("--search", type=str, default="none", choices=["all", "initial", "none"])  # all
+    parser.add_argument("--search_to_main", type=str, default="all", choices=["all", "qr"])  # all
+    parser.add_argument("--main", type=str, default="qr", choices=["all", "qr"])  # all, none, query_response, search_only
+    args = parser.parse_args()
+
+    main_to_search_select_fn = {
+        "all": ContextSelector.select_skip_system,
+        "initial": ContextSelector.select_initial_with_system,
+        "none": ContextSelector.select_none,
+    }[args.main_to_search]
+    search_contextual_select_fn = {
+        "all": ContextSelector.select_all,
+        "initial": ContextSelector.select_initial,
+        "none": ContextSelector.select_none,
+    }[args.search]
+    search_to_main_select_fn = {
+        "all": ContextSelector.select_skip_system,
+        "qr": ContextSelector.select_query_response_with_system,
+    }[args.search_to_main]
+    main_contextual_select_fn = {
+        "all": ContextSelector.select_all,
+        "qr": ContextSelector.select_query_response,
+    }[args.main]
+
 
     # Environment variables (search tools)
     # NOTE: This project stores keys in a local file; keep behavior consistent with subagent_research.py.
@@ -148,19 +172,13 @@ def main() -> None:
         api_key="not-needed",
         url=args.model_url,
     )
-    search_model = model
     # model = HFContextAttentionQwenModel(
-    #     "Qwen/Qwen3-32B",
+    #     "Qwen3/Qwen3-32B",
     #     model_config_dict={"temperature": 0.0, "max_tokens": 32768},
     #     enable_thinking=False,
-    #     device=[7,8,9]
+    #     device=[0]
     # )
-    # search_model = HFContextAttentionQwenModel(
-    #     "Qwen/Qwen3-32B",
-    #     model_config_dict={"temperature": 0.0, "max_tokens": 32768},
-    #     enable_thinking=False,
-    #     device=[4,5,6]
-    # )
+    search_model = model
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
     search_tool = FunctionTool(search_engine)
 
@@ -200,20 +218,20 @@ def main() -> None:
                 else:
                     context_plan = {
                         # Memory selectors (all-to-all)
-                        "search_to_main_selector": ContextSelector(
+                        'search_to_main_selector': ContextSelector(
                             filter_fn=ContextSelector.filter_search_only,
-                            select_fn=ContextSelector.select_skip_system,
+                            select_fn=search_to_main_select_fn
                         ),
-                        "main_to_search_selector": ContextSelector(
+                        'main_to_search_selector': ContextSelector(
                             filter_fn=None,
-                            select_fn=ContextSelector.select_skip_system,
+                            select_fn=main_to_search_select_fn
                         ),
                         # Contextual selectors (attention drop)
-                        "search_contextual": ContextSelector(
-                            select_fn=ContextSelector.select_none  # Drop all from main
+                        'search_contextual': ContextSelector(
+                            select_fn=search_contextual_select_fn  # Drop all from main
                         ),
-                        "main_contextual": ContextSelector(
-                            select_fn=ContextSelector.select_query_response  # Keep query+response from search
+                        'main_contextual': ContextSelector(
+                            select_fn=main_contextual_select_fn  # Keep query+response from search
                         ),
                     }
                 pred_raw, tracker = run_research(
