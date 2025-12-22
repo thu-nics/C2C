@@ -59,14 +59,16 @@ if __name__ == "__main__":
     # weave.init("nics-efc/camel")
     # with weave.thread(thread_id="subagent_research"):
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-32B")
-    tracker = InteractionTracker(tokenizer=tokenizer, sort_by_llm_id=True)
+    tracker = InteractionTracker(tokenizer=tokenizer, sort_by_llm_id=False)
 
     search_tool = FunctionTool(search_engine)
     # search_tool = FunctionTool(SearchToolkit().search_google)
 
     # question = "Were Scott Derrickson and Ed Wood of the same nationality?"
-    question="What science fantasy young adult series, told in first person, has a set of companion books narrating the stories of enslaved worlds and alien species?" # answer: Animorphs
-    # question="Which performance act has a higher instrument to person ratio, Badly Drawn Boy or Wolf Alice?"
+    # question="What science fantasy young adult series, told in first person, has a set of companion books narrating the stories of enslaved worlds and alien species?" # answer: Animorphs
+    # question="What government position was held by the woman who portrayed Corliss Archer in the film Kiss and Tell?" # Chief of Protocol
+    question="Which performance act has a higher instrument to person ratio, Badly Drawn Boy or Wolf Alice?"
+    # question="A Japanese manga series based on a 16 year old high school student Ichitaka Seto, is written and illustrated by someone born in what year?"
 
     # Context plan with memory selectors and contextual (attention drop) selectors
     # Contexualization

@@ -7,12 +7,13 @@ Dataset: https://huggingface.co/datasets/hotpotqa/hotpot_qa
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import os
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Callable
 from datasets import load_dataset
 from transformers import AutoTokenizer
 from tqdm import tqdm
@@ -23,10 +24,14 @@ from camel.types import ModelPlatformType
 from camel.toolkits import FunctionTool
 
 from rosetta.workflow.selector import ContextSelector
-from rosetta.workflow.track import InteractionTracker
+from rosetta.workflow.track import InteractionTracker, TreeTracker
 from rosetta.workflow.evaluation import extract_answer, exact_match, load_done_ids, run_research
 from rosetta.workflow.retriever import search_engine
 from rosetta.workflow.hf_qwen_model import HFContextAttentionQwenModel
+
+# Environment variables (search tools)
+# NOTE: This project stores keys in a local file; keep behavior consistent with subagent_research.py.
+from rosetta.workflow.API import FIRECRAWL_API_KEY, GOOGLE_API_KEY, SEARCH_ENGINE_ID
 
 
 @dataclass
@@ -81,6 +86,7 @@ def main() -> None:
     parser.add_argument("--subset", default="distractor", choices=["distractor", "fullwiki"])
     parser.add_argument("--split", default="validation")
     parser.add_argument("--limit", type=int, default=5)
+    parser.add_argument("--max-rounds", type=int, default=10)
     parser.add_argument("--output", default="local/evaluation/direct/hotpotqa.jsonl")
     parser.add_argument(
         "--output-format",
@@ -99,36 +105,33 @@ def main() -> None:
     parser.add_argument("--model-url", default="http://localhost:30000/v1")
     parser.add_argument("--model-type", default="contextual-model")
     parser.add_argument("--tokenizer", default="Qwen/Qwen3-32B")
-    parser.add_argument("--mode", default="oneflow", choices=["oneflow", "single"])
-    parser.add_argument("--main_to_search", type=str, default="all", choices=["all", "initial", "none"])  # all
-    parser.add_argument("--search", type=str, default="none", choices=["all", "initial", "none"])  # all
-    parser.add_argument("--search_to_main", type=str, default="all", choices=["all", "qr"])  # all
-    parser.add_argument("--main", type=str, default="qr", choices=["all", "qr"])  # all, none, query_response, search_only
+    parser.add_argument("--mode", default="oneflow", choices=["oneflow", "single", "tree"])
+    parser.add_argument("--main_to_search", type=str, default="none", choices=["all", "initial", "none"])
+    parser.add_argument("--search", type=str, default="none", choices=["all", "initial", "none"])
+    parser.add_argument("--search_to_main", type=str, default="qr", choices=["all", "qr"])
+    parser.add_argument("--main", type=str, default="all", choices=["all", "none", "qr"]) 
     args = parser.parse_args()
 
-    main_to_search_select_fn = {
+    main_to_search_select_fn: Callable = {
         "all": ContextSelector.select_skip_system,
         "initial": ContextSelector.select_initial_with_system,
         "none": ContextSelector.select_none,
     }[args.main_to_search]
-    search_contextual_select_fn = {
+    search_contextual_select_fn: Callable = {
         "all": ContextSelector.select_all,
         "initial": ContextSelector.select_initial,
         "none": ContextSelector.select_none,
     }[args.search]
-    search_to_main_select_fn = {
+    search_to_main_select_fn: Callable = {
         "all": ContextSelector.select_skip_system,
         "qr": ContextSelector.select_query_response_with_system,
     }[args.search_to_main]
-    main_contextual_select_fn = {
+    main_contextual_select_fn: Callable = {
         "all": ContextSelector.select_all,
         "qr": ContextSelector.select_query_response,
     }[args.main]
 
-
-    # Environment variables (search tools)
-    # NOTE: This project stores keys in a local file; keep behavior consistent with subagent_research.py.
-    from rosetta.workflow.API import FIRECRAWL_API_KEY, GOOGLE_API_KEY, SEARCH_ENGINE_ID
+    args = parser.parse_args()
 
     os.environ["FIRECRAWL_API_KEY"] = FIRECRAWL_API_KEY
     os.environ["GOOGLE_API_KEY"] = GOOGLE_API_KEY
@@ -186,6 +189,7 @@ def main() -> None:
     total = 0
     correct = 0
     use_single = args.mode == "single"
+    use_tree = args.mode == "tree"
 
     # Always stream records during the run to JSONL (output file or sidecar).
     jsonl_f = run_jsonl_path.open("a", encoding="utf-8")
@@ -202,6 +206,7 @@ def main() -> None:
             # reset main agent memory
             tools = [search_tool] if use_single else None
             main_agent = ChatAgent(system_message="You are a helpful assistant.", model=model, tools=tools)
+            tree_tracker = TreeTracker() if use_tree else None
             
             t0 = time.time()
             pred_raw = ""
@@ -215,7 +220,7 @@ def main() -> None:
                             select_fn=ContextSelector.select_query_response
                         ),
                     }
-                else:
+                elif not use_tree:
                     context_plan = {
                         # Memory selectors (all-to-all)
                         'search_to_main_selector': ContextSelector(
@@ -234,6 +239,8 @@ def main() -> None:
                             select_fn=main_contextual_select_fn  # Keep query+response from search
                         ),
                     }
+                else:
+                    context_plan = None
                 pred_raw, tracker = run_research(
                     mode=args.mode,
                     question=question,
@@ -243,6 +250,12 @@ def main() -> None:
                     search_tool=search_tool if not use_single else None,
                     context_plan=context_plan,
                     show_status=False,
+                    max_rounds=args.max_rounds,
+                    worker_model=search_model if use_tree else None,
+                    rewind_model=search_model if use_tree else None,
+                    exam_model=search_model if use_tree else None,
+                    worker_tool=search_tool if use_tree else None,
+                    tree_tracker=tree_tracker,
                 )
                 extracted = extract_answer(pred_raw)
                 pred = extracted if extracted is not None else pred_raw.strip()
@@ -280,8 +293,25 @@ def main() -> None:
     if args.output_format == "json":
         _jsonl_to_json_array(run_jsonl_path, out_path)
 
+    # Write CSV (all fields except llm0_messages)
+    csv_path = out_path.with_suffix(".csv")
+    csv_fields = ["idx", "hotpot_id", "question", "gold_answer", "pred_answer", "pred_raw", "correct_em", "seconds", "error"]
+    with run_jsonl_path.open("r", encoding="utf-8") as fin, csv_path.open("w", encoding="utf-8", newline="") as fout:
+        writer = csv.DictWriter(fout, fieldnames=csv_fields)
+        writer.writeheader()
+        for line in fin:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+                row = {k: obj.get(k) for k in csv_fields}
+                writer.writerow(row)
+            except json.JSONDecodeError:
+                continue
+
     acc = (correct / total) if total else 0.0
-    summary_line = f"evaluated={total} EM={correct} acc={acc:.3f} output={out_path}"
+    summary_line = f"evaluated={total} EM={correct} acc={acc:.3f} output={out_path} csv={csv_path}"
     summary_path = out_path.parent / "summary.txt"
     summary_path.write_text(summary_line + "\n", encoding="utf-8")
     print(f"Done. {summary_line} summary={summary_path}")

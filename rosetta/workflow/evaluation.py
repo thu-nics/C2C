@@ -124,6 +124,12 @@ def run_research(
     search_tool: Optional["FunctionTool"] = None,
     context_plan: Optional[dict] = None,
     show_status: bool = True,
+    worker_model: Optional["BaseModelBackend"] = None,
+    rewind_model: Optional["BaseModelBackend"] = None,
+    exam_model: Optional["BaseModelBackend"] = None,
+    worker_tool: Optional["FunctionTool"] = None,
+    tree_tracker: Optional[object] = None,
+    max_rounds: int = 10,
 ) -> Tuple[str, Optional["InteractionTracker"]]:
     """Dispatch to the requested research workflow."""
     mode = mode.lower()
@@ -146,6 +152,23 @@ def run_research(
             tracker=tracker,
             search_tool=search_tool,
             context_plan=context_plan,
+            show_status=show_status,
+        )
+    if mode == "tree":
+        if worker_model is None:
+            raise ValueError("worker_model is required for mode='tree'")
+        from rosetta.workflow.treeflow import do_tree_research
+
+        return do_tree_research(
+            question=question,
+            main_agent=main_agent,
+            worker_model=worker_model,
+            rewind_model=rewind_model,
+            exam_model=exam_model,
+            tracker=tracker,
+            tree_tracker=tree_tracker,
+            worker_tool=worker_tool,
+            max_rounds=max_rounds,
             show_status=show_status,
         )
     raise ValueError(f"Unsupported mode: {mode}")

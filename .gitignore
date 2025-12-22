@@ -25,6 +25,7 @@ run.sh
 test.py
 script/train/SFT_train_debug.py
 AGENTS.md
+CLAUDE.md
 package-lock.json
 
 # Secrets

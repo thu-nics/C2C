@@ -32,7 +32,7 @@ def MemoryRecord_flip_role(message: MemoryRecord) -> MemoryRecord:
         raise ValueError(f"Unsupported role type: {message.message.role_type}.")
     return message
 
-def messages_to_camel_messages(
+def messages_to_memoryRecords(
     chat_history: List[dict], 
     skip_system: bool = False
 ) -> List[MemoryRecord]:

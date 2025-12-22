@@ -11,7 +11,7 @@ from rosetta.workflow.track import InteractionTracker, record_interaction
 from rosetta.workflow.prompt import (
     SEARCH_TASK_DECOMPOSE_PROMPT, SEARCH_AGENT_PROMPT, RESPONSE_PROMPT_DIRECT
 )
-from rosetta.workflow.camel_utils import messages_to_camel_messages, context_records_to_memory_records, MemoryRecord_flip_role
+from rosetta.workflow.camel_utils import messages_to_memoryRecords, context_records_to_memory_records, MemoryRecord_flip_role
 
 def direct_subagent_research(
     question: str,
@@ -103,7 +103,7 @@ def extend_subagent_research(
     # Search the internet for information, then summarize by LLM.
     information_list = []
     messages = main_agent.chat_history
-    camel_messages = messages_to_camel_messages(messages, skip_system=True)
+    camel_messages = messages_to_memoryRecords(messages, skip_system=True)
     for i, subtask in enumerate(subtasks):
         query = subtask.content
         # Create a new search agent for each query
@@ -165,7 +165,7 @@ def extend_sequential_subagent_research(
     information_list = []
     camel_history = []
     messages = main_agent.chat_history
-    camel_messages = messages_to_camel_messages(messages, skip_system=True)
+    camel_messages = messages_to_memoryRecords(messages, skip_system=True)
     camel_history.append(camel_messages)
     for i, subtask in enumerate(subtasks):
         query = subtask.content
@@ -236,7 +236,7 @@ def full_subagent_research(
     information_list = []
     camel_history = []
     messages = main_agent.chat_history
-    camel_messages = messages_to_camel_messages(messages, skip_system=True)
+    camel_messages = messages_to_memoryRecords(messages, skip_system=True)
     for i, subtask in enumerate(subtasks):
         query = subtask.content
         # Create a new search agent for each query
