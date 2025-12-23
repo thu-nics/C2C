@@ -1,4 +1,19 @@
-# API Keys - DO NOT COMMIT THIS FILE
-FIRECRAWL_API_KEY = "fc-1b6634fa4c834fe5b22a9c358d30f9df"
-GOOGLE_API_KEY = "AIzaSyCJSD0V_hBkm2jwejGEGFEbceQ-c69f-PU"
-SEARCH_ENGINE_ID = "c779c61ccee034579"
+"""API key placeholders loaded from .env for backward compatibility."""
+
+from __future__ import annotations
+
+import os
+
+from dotenv import find_dotenv, load_dotenv
+
+load_dotenv(find_dotenv())
+
+FIRECRAWL_API_KEY = os.getenv("FIRECRAWL_API_KEY", "")
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
+SEARCH_ENGINE_ID = os.getenv("SEARCH_ENGINE_ID", "")
+BRAVE_API_KEY = os.getenv("BRAVE_API_KEY", "")
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
+EXA_API_KEY = os.getenv("EXA_API_KEY", "")
+TONGXIAO_API_KEY = os.getenv("TONGXIAO_API_KEY", "")
+METASO_API_KEY = os.getenv("METASO_API_KEY", "")
+LINKUP_API_KEY = os.getenv("LINKUP_API_KEY", "")
