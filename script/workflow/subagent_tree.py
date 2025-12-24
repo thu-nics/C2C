@@ -16,6 +16,7 @@ from dotenv import find_dotenv, load_dotenv
 from rosetta.workflow.track import InteractionTracker, TreeTracker
 from rosetta.workflow.treeflow import do_tree_research
 from rosetta.workflow.retriever import search_engine
+from rosetta.workflow.tree_prompt import TREE_ACTIONS, build_decision_prompt
 
 # Environment Variables
 load_dotenv(find_dotenv())
@@ -42,21 +43,19 @@ if __name__ == "__main__":
     tracker = InteractionTracker(tokenizer=tokenizer, sort_by_llm_id=False)
     tree_tracker = TreeTracker()
 
-    # search_tool = FunctionTool(search_engine)
-    # search_tool = FunctionTool(SearchToolkit().search_google)
-    # search_tool = FunctionTool(SearchToolkit().search_wiki)
+    # Choose search tool
     tools = []
     tools.append(FunctionTool(search_engine))
-    tools.append(FunctionTool(SearchToolkit().search_wiki)) # successful
-    tools.append(FunctionTool(SearchToolkit().search_brave)) # successful
-    tools.append(FunctionTool(SearchToolkit().search_google)) # successful
-    tools.append(FunctionTool(SearchToolkit().search_tavily)) # successful
-    tools.append(FunctionTool(SearchToolkit().search_exa)) # successful
-    tools.append(FunctionTool(SearchToolkit().search_alibaba_tongxiao)) # successful
-    tools.append(FunctionTool(SearchToolkit().search_metaso)) # successful
+    tools.append(FunctionTool(SearchToolkit().search_wiki))  # successful
+    # tools.append(FunctionTool(SearchToolkit().search_brave))  # successful, but rate limited
+    tools.append(FunctionTool(SearchToolkit().search_google))  # successful
+    tools.append(FunctionTool(SearchToolkit().search_tavily))  # successful
+    # tools.append(FunctionTool(SearchToolkit().search_exa))  # successful
+    # tools.append(FunctionTool(SearchToolkit().search_alibaba_tongxiao))  # successful
+    # tools.append(FunctionTool(SearchToolkit().search_metaso))  # successful
 
-    # question = "Which performance act has a higher instrument to person ratio, Badly Drawn Boy or Wolf Alice?"
-    question="A Japanese manga series based on a 16 year old high school student Ichitaka Seto, is written and illustrated by someone born in what year?"
+    question = "Which performance act has a higher instrument to person ratio, Badly Drawn Boy or Wolf Alice?"
+    # question = "A Japanese manga series based on a 16 year old high school student Ichitaka Seto, is written and illustrated by someone born in what year?"
 
     response, tracker = do_tree_research(
         question=question,

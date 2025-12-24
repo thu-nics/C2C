@@ -17,108 +17,120 @@ Ensure that the task plan is created without asking any questions.
 Be specific and clear.
 """
 
-DECISION_PROMPT = """Decide the next action based on current progress.
-
-Question: {question}
-
-Remaining tasks:
-{tasks}
-
-Choose ONE action and output only its block:
-
-1. Execute next task (run one subtask through the worker):
-<action>execute</action>
-<task>Self-contained subtask with necessary context</task>
-
-2. Revise tasks (update the remaining task list based on new findings):
-<action>revise</action>
+# Tree workflow actions - modular action definitions
+TREE_ACTIONS = {
+    "execute": {
+        "description": "Execute next task - proceed with the next subtask",
+        "format": """<action>execute</action>
+<task>Self-contained subtask with necessary context</task>""",
+        "guidelines": [
+            "When executing, include all needed context in the <task>",
+            "Frame the task to be self-contained - the subagent cannot see prior conversation",
+            "Include relevant context (e.g., candidate names, criteria) in the task itself",
+        ]
+    },
+    "revise": {
+        "description": "Revise tasks - update the remaining task list based on new findings",
+        "format": """<action>revise</action>
 <tasks>
 <task>Revised subtask 1</task>
 <task>Revised subtask 2</task>
-</tasks>
+</tasks>""",
+        "guidelines": [
+            "Build on previous findings - if candidates were found, verify them against remaining criteria",
+            "If a subtask failed, try a different approach (e.g., search for specific candidate + criterion)",
+            "Avoid repetition - don't repeat failed searches with identical queries",
+        ]
+    },
+    "exam": {
+        "description": "Exam - verify a previous step's result if it seems suspicious or critical",
+        "format": """<action>exam</action>
+<step>step_index to examine (0-indexed)</step>""",
+        "guidelines": [
+            "Subagent results may be wrong - do not blindly trust them",
+            "If a result seems suspicious or inconsistent, use exam to verify before proceeding",
+            "Verify critical steps that affect the final answer",
+        ]
+    },
+    "rewind": {
+        "description": "Rewind - if the current path repeatedly fails and you need to backtrack to restart",
+        "format": """<action>rewind</action>""",
+        "guidelines": [
+            "Only use rewind when the entire workflow direction is fundamentally wrong",
+            "Use when you need to backtrack to a very early step to restart",
+            "Try different approaches after rewinding",
+            "Use rewind only if you must restart from an early step due to a major workflow error",
+        ]
+    },
+    "answer": {
+        "description": "Answer - final response when you have enough verified information",
+        "format": """<action>answer</action>
+<answer>{{"justification":"1-2 short sentences", "answer":"final answer span"}}</answer>""",
+        "guidelines": [
+            "Provide the final answer when you have enough verified information",
+            "Ensure justification is concise (1-2 sentences)",
+            "Answer should be the final answer span only",
+        ]
+    },
+}
 
-3. Rewind (only if the entire path is failing and cannot be fixed with revision):
-<action>rewind</action>
 
-4. Answer (final response when you have enough verified information):
-<action>answer</action>
-<answer>{{"justification":"1-2 short sentences", "answer":"final answer span"}}</answer>
+def build_decision_prompt(actions: list[str], question_var: str = "{question}", tasks_var: str = "{tasks}", include_tasks: bool = True) -> str:
+    """Build a decision prompt from selected actions.
 
-Guidelines:
-- When executing, include all needed context in the <task>.
-- Build on prior findings and avoid repetition.
-- Use rewind only if you must restart from an early step due to a major workflow error.
-- Try different approaches after rewinding.
-"""
+    Args:
+        actions: List of action names to include (e.g., ["execute", "revise", "answer"])
+        question_var: Variable name for question (default: "{question}")
+        tasks_var: Variable name for tasks (default: "{tasks}")
+        include_tasks: Whether to include the "Remaining tasks:" section (default: True)
 
-DECISION_PROMPT_3 = """Decide the next action based on current progress.
+    Returns:
+        Formatted decision prompt string
+    """
+    prompt_lines = [
+        "Decide the next action based on current progress.",
+        "",
+        f"Question: {question_var}",
+        "",
+    ]
 
-Question: {question}
+    if include_tasks:
+        prompt_lines.extend([
+            f"Remaining tasks:",
+            tasks_var,
+            "",
+        ])
 
-Remaining tasks:
-{tasks}
+    prompt_lines.extend([
+        "Choose ONE action and output only its block:",
+        ""
+    ])
 
-Choose ONE action and output only its block:
+    # Add action options
+    for i, action_name in enumerate(actions, 1):
+        if action_name not in TREE_ACTIONS:
+            raise ValueError(f"Unknown action: {action_name}")
 
-1. Execute next task (run one subtask through the worker):
-<action>execute</action>
-<task>Self-contained subtask with necessary context</task>
+        action = TREE_ACTIONS[action_name]
+        prompt_lines.append(f"{i}. {action['description']}:")
+        prompt_lines.append(action["format"])
+        prompt_lines.append("")
 
-2. Revise tasks (update the remaining task list based on new findings):
-<action>revise</action>
-<tasks>
-<task>Revised subtask 1</task>
-<task>Revised subtask 2</task>
-</tasks>
+    # Collect all guidelines
+    all_guidelines = []
+    for action_name in actions:
+        all_guidelines.extend(TREE_ACTIONS[action_name]["guidelines"])
 
-3. Answer (final response when you have enough verified information):
-<action>answer</action>
-<answer>{{"justification":"1-2 short sentences", "answer":"final answer span"}}</answer>
+    if all_guidelines:
+        prompt_lines.append("Guidelines:")
+        for guideline in all_guidelines:
+            prompt_lines.append(f"- {guideline}")
 
-Guidelines:
-- When executing, include all needed context in the <task>.
-- Build on prior findings and avoid repetition.
-"""
+    return "\n".join(prompt_lines)
 
-DECISION_PROMPT_5 = """Based on the current progress, decide your next action.
 
-Question: {question}
-
-Remaining tasks:
-{tasks}
-
-Choose one action:
-
-1. Execute next task - proceed with the next subtask:
-<action>execute</action>
-<task>Subtask and its necessary context to execute</task>
-
-2. Revise tasks - modify the task list based on new findings:
-<action>revise</action>
-<tasks>
-<task>Revised subtask 1</task>
-<task>Revised subtask 2</task>
-</tasks>
-
-3. Exam - verify a previous step's result if it seems suspicious or critical:
-<action>exam</action>
-<step>step_index to examine (0-indexed)</step>
-
-4. Rewind - if the current path repeatedly fails and you need to backtrack to a very early step to restart:
-<action>rewind</action>
-
-5. Answer - if you have enough information to answer:
-<action>answer</action>
-<answer>{{"justification":"1-2 short sentences", "answer":"final answer span"}}</answer>
-
-Guidelines:
-- Subagent results may be wrong. Do not blindly trust them. If a result seems suspicious, use "exam" to verify before proceeding.
-- When executing, frame the task to be self-contained. The subagent cannot see prior conversation, so include relevant context (e.g., candidate names, criteria) in the task itself.
-- Build on previous findings. If candidates were found, verify them against remaining criteria.
-- If a subtask result seems wrong or inconsistent, use "exam" to verify it or "revise" to try a different approach.
-- Only use rewind when the entire workflow direction is fundamentally wrong and you need to backtrack to a very early step to restart.
-- Provide the final answer when you have enough verified information.
-"""
+# Pre-built decision prompts for convenience
+DECISION_PROMPT = build_decision_prompt(["execute", "revise", "rewind", "answer"])
 
 WORKER_PROMPT = """You are a helpful search agent. Given a subtask, complete it by either:
 - Searching the internet if external information is needed.
@@ -172,4 +184,17 @@ Question: {question}
 Output:
 <action>answer</action>
 <answer>{{"justification":"1-2 short sentences", "answer":"final answer span"}}</answer>
+"""
+
+SELECT_PROMPT = """You are a selection agent. Given a question and multiple responses from different tools, select the one that best answers the question.
+
+Question: {question}
+
+Task: {task}
+
+Responses:
+{responses}
+
+Select the response that best answers the question. Output the response number (1-indexed):
+<select>response_number</select>
 """
