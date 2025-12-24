@@ -5,24 +5,20 @@ To launch the server:
 CUDA_VISIBLE_DEVICES=0,1 python -m sglang.launch_server --model-path Qwen/Qwen3-32B --host 0.0.0.0 --tp-size 2 --tool-call-parser qwen --port 30000
 """
 
-import os
 from transformers import AutoTokenizer
 
 from camel.agents import ChatAgent
 from camel.models import ModelFactory
 from camel.types import ModelPlatformType
 from camel.toolkits import FunctionTool, SearchToolkit
+from dotenv import find_dotenv, load_dotenv
 
 from rosetta.workflow.track import InteractionTracker, TreeTracker
 from rosetta.workflow.treeflow import do_tree_research
 from rosetta.workflow.retriever import search_engine
 
-### Environment Variables ###
-from rosetta.workflow.API import FIRECRAWL_API_KEY, GOOGLE_API_KEY, SEARCH_ENGINE_ID
-os.environ["FIRECRAWL_API_KEY"] = FIRECRAWL_API_KEY
-os.environ["GOOGLE_API_KEY"] = GOOGLE_API_KEY
-os.environ["SEARCH_ENGINE_ID"] = SEARCH_ENGINE_ID
-### Environment Variables ###
+# Environment Variables
+load_dotenv(find_dotenv())
 
 model = ModelFactory.create(
     model_platform=ModelPlatformType.OPENAI_COMPATIBLE_MODEL,
@@ -46,11 +42,21 @@ if __name__ == "__main__":
     tracker = InteractionTracker(tokenizer=tokenizer, sort_by_llm_id=False)
     tree_tracker = TreeTracker()
 
-    search_tool = FunctionTool(search_engine)
+    # search_tool = FunctionTool(search_engine)
     # search_tool = FunctionTool(SearchToolkit().search_google)
+    # search_tool = FunctionTool(SearchToolkit().search_wiki)
+    tools = []
+    tools.append(FunctionTool(search_engine))
+    tools.append(FunctionTool(SearchToolkit().search_wiki)) # successful
+    tools.append(FunctionTool(SearchToolkit().search_brave)) # successful
+    tools.append(FunctionTool(SearchToolkit().search_google)) # successful
+    tools.append(FunctionTool(SearchToolkit().search_tavily)) # successful
+    tools.append(FunctionTool(SearchToolkit().search_exa)) # successful
+    tools.append(FunctionTool(SearchToolkit().search_alibaba_tongxiao)) # successful
+    tools.append(FunctionTool(SearchToolkit().search_metaso)) # successful
 
-    question = "Which performance act has a higher instrument to person ratio, Badly Drawn Boy or Wolf Alice?"
-    # question="A Japanese manga series based on a 16 year old high school student Ichitaka Seto, is written and illustrated by someone born in what year?"
+    # question = "Which performance act has a higher instrument to person ratio, Badly Drawn Boy or Wolf Alice?"
+    question="A Japanese manga series based on a 16 year old high school student Ichitaka Seto, is written and illustrated by someone born in what year?"
 
     response, tracker = do_tree_research(
         question=question,
@@ -59,7 +65,7 @@ if __name__ == "__main__":
         rewind_model=rewind_model,
         tracker=tracker,
         tree_tracker=tree_tracker,
-        worker_tool=search_tool,
+        worker_tools=tools,
         max_rounds=30,
     )
 

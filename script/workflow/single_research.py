@@ -3,25 +3,21 @@ To launch the server:
 CUDA_VISIBLE_DEVICES=0,1 python -m sglang.launch_server --model-path Qwen/Qwen3-32B --host 0.0.0.0 --tp-size 2 --tool-call-parser qwen --port 30000
 """
 
-import os
 from transformers import AutoTokenizer
 
 from camel.agents import ChatAgent
 from camel.models import ModelFactory
 from camel.types import ModelPlatformType
 from camel.toolkits import FunctionTool
+from dotenv import find_dotenv, load_dotenv
 
 from rosetta.workflow.track import InteractionTracker
 from rosetta.workflow.selector import ContextSelector
 from rosetta.workflow.singleflow import single_research
 from rosetta.workflow.retriever import search_engine
 
-### Environment Variables ###
-from rosetta.workflow.API import FIRECRAWL_API_KEY, GOOGLE_API_KEY, SEARCH_ENGINE_ID
-os.environ["FIRECRAWL_API_KEY"] = FIRECRAWL_API_KEY
-os.environ["GOOGLE_API_KEY"] = GOOGLE_API_KEY
-os.environ["SEARCH_ENGINE_ID"] = SEARCH_ENGINE_ID
-### Environment Variables ###
+# Environment Variables
+load_dotenv(find_dotenv())
 
 model = ModelFactory.create(
     model_platform=ModelPlatformType.OPENAI_COMPATIBLE_MODEL,

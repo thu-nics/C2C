@@ -139,21 +139,31 @@ def _rollback_history(main_agent: ChatAgent, messages: List[dict], rewind_idx: i
         main_agent.memory.write_records(summary_records)
 
 
-def do_execute(task: str, worker_model: BaseModelBackend, worker_tool: FunctionTool,
+def do_execute(task: str, worker_model: BaseModelBackend, worker_tools: List[FunctionTool],
                tracker: InteractionTracker = None, step_idx: int = 0,
                update_status: callable = None) -> str:
     """Execute a subtask using worker agent."""
     worker_agent = ChatAgent(
         system_message=WORKER_PROMPT,
         model=worker_model,
-        tools=[worker_tool]
+        tools=worker_tools
     )
     if tracker is not None:
-        tracker.register_tools(llm_id=step_idx + 1, tools=[worker_tool])
+        tracker.register_tools(llm_id=step_idx + 1, tools=worker_tools)
 
     response = worker_agent.step(task)
+
+    # Extract tool names from chat history
+    tools_used = []
+    for msg in worker_agent.chat_history:
+        if msg.get("role") == "assistant" and "tool_calls" in msg:
+            for tc in msg["tool_calls"]:
+                tool_name = tc.get("function", {}).get("name")
+                if tool_name and tool_name not in tools_used:
+                    tools_used.append(tool_name)
+
     if update_status:
-        update_status(response.msg.content)
+        update_status(response.msg.content, tools_used=tools_used if tools_used else None)
     record_interaction(tracker, worker_agent.chat_history, llm_id=step_idx + 1)
     return response.msg.content
 
@@ -245,7 +255,7 @@ def do_tree_research(
     exam_model: BaseModelBackend = None,
     tracker: InteractionTracker = None,
     tree_tracker: Any = None,
-    worker_tool: FunctionTool = None,
+    worker_tools: List[FunctionTool] = None,
     max_rounds: int = 10,
     show_status: bool = True,
 ) -> Tuple[str, Optional[InteractionTracker]]:
@@ -259,7 +269,7 @@ def do_tree_research(
         exam_model: Model for exam agent. Defaults to worker_model.
         tracker: Interaction tracker.
         tree_tracker: Tree structure tracker.
-        worker_tool: Tool for worker. Defaults to Google search.
+        worker_tools: List of tools for worker. Defaults to [Google search].
         max_rounds: Maximum iterations.
         show_status: Show spinner status.
 
@@ -267,8 +277,8 @@ def do_tree_research(
         Answer string and tracker.
     """
     logger = StatusLogger(enabled=show_status)
-    if worker_tool is None:
-        worker_tool = FunctionTool(SearchToolkit().search_google)
+    if worker_tools is None:
+        worker_tools = [FunctionTool(SearchToolkit().search_google)]
     if rewind_model is None:
         rewind_model = worker_model
     if exam_model is None:
@@ -308,7 +318,7 @@ def do_tree_research(
                 tasks_at_step[end_idx] = list(tasks)  # snapshot before execute
                 if tree_tracker is not None:
                     tree_tracker.register_step(end_idx, node_id - 1)  # node_id was incremented after add_node
-                feedback = do_execute(data["task"], worker_model, worker_tool,
+                feedback = do_execute(data["task"], worker_model, worker_tools,
                                       tracker, end_idx, update_status)
                 records = messages_to_memoryRecords([
                     {"role": "user", "content": data["task"]},

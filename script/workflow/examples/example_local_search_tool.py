@@ -7,13 +7,19 @@ To launch the LLM server:
 CUDA_VISIBLE_DEVICES=0,1 python -m sglang.launch_server --model-path Qwen/Qwen3-32B --host 0.0.0.0 --tp-size 2 --tool-call-parser qwen --port 30000
 """
 
+import os
+
 from camel.agents import ChatAgent
 from camel.models import ModelFactory
 from camel.toolkits import FunctionTool
 from camel.types import ModelPlatformType
+from camel.toolkits import SearchToolkit
+from dotenv import find_dotenv, load_dotenv
 
 from rosetta.workflow.retriever import search_engine
 
+# Environment Variables
+load_dotenv(find_dotenv())
 
 def main():
     # Create model
@@ -30,7 +36,21 @@ def main():
     )
 
     # Create search tool
-    search_tool = FunctionTool(search_engine)
+    tools = []
+
+    # tools.append(FunctionTool(SearchToolkit().search_linkup)) # failed due to access denied
+    # tools.append(FunctionTool(SearchToolkit().search_duckduckgo)) # failed due to rate limit
+    # tools.append(FunctionTool(SearchToolkit().search_baidu)) # failed due to security check
+    # tools.append(FunctionTool(SearchToolkit().search_bing)) # failed due to chaotic results
+    
+    # tools.append(FunctionTool(search_engine))
+    # tools.append(FunctionTool(SearchToolkit().search_wiki)) # successful
+    # tools.append(FunctionTool(SearchToolkit().search_brave)) # successful
+    tools.append(FunctionTool(SearchToolkit().search_google)) # successful
+    # tools.append(FunctionTool(SearchToolkit().search_tavily)) # successful
+    # tools.append(FunctionTool(SearchToolkit().search_exa)) # successful
+    # tools.append(FunctionTool(SearchToolkit().search_alibaba_tongxiao)) # successful
+    # tools.append(FunctionTool(SearchToolkit().search_metaso)) # successful
 
     # Test 1: ChatAgent with tool
     print("=" * 60)
@@ -40,7 +60,7 @@ def main():
     agent = ChatAgent(
         system_message="You are a helpful assistant to do search task.",
         model=model,
-        tools=[search_tool],
+        tools=tools,
     )
 
     query = "What nationality is Scott Derrickson?"
@@ -52,6 +72,10 @@ def main():
         print(f"\nTool calls made: {len(response.info['tool_calls'])}")
         for tc in response.info["tool_calls"]:
             print(f"  - {tc.tool_name}({tc.args})")
+
+    print(agent.chat_history)
+
+
 
     # Test 2: Direct function call
     print("\n" + "=" * 60)

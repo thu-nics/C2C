@@ -31,9 +31,9 @@ def _get_components() -> tuple[SGLangEmbedding, FaissStorage]:
 
 
 def search_engine(query: str, top_k: int = 5) -> list[dict[str, Any]]:
-    """Search Wikipedia articles for information related to the query.
+    """Search local wiki database for information related to the query.
 
-    Use this tool to find relevant Wikipedia article snippets that may
+    Use this tool to find relevant local wiki database article snippets that may
     contain answers to factual questions.
 
     Args:
@@ -43,7 +43,7 @@ def search_engine(query: str, top_k: int = 5) -> list[dict[str, Any]]:
     Returns:
         List[Dict[str, Any]]: A list of search results, each containing:
             - 'result_id': Result number (1-indexed).
-            - 'title': The Wikipedia article title.
+            - 'title': The local wiki database article title.
             - 'description': A snippet of the article content.
             - 'url': A placeholder URL for the article.
 
@@ -76,4 +76,3 @@ def search_engine(query: str, top_k: int = 5) -> list[dict[str, Any]]:
         })
 
     return responses
-

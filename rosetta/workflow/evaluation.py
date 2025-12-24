@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Optional, TYPE_CHECKING, Tuple
+from typing import List, Optional, TYPE_CHECKING, Tuple
 
 from rosetta.workflow.singleflow import single_research
 
@@ -121,13 +121,13 @@ def run_research(
     main_agent: "ChatAgent",
     tracker: Optional["InteractionTracker"] = None,
     search_model: Optional["BaseModelBackend"] = None,
-    search_tool: Optional["FunctionTool"] = None,
+    search_tools: Optional[List["FunctionTool"]] = None,
     context_plan: Optional[dict] = None,
     show_status: bool = True,
     worker_model: Optional["BaseModelBackend"] = None,
     rewind_model: Optional["BaseModelBackend"] = None,
     exam_model: Optional["BaseModelBackend"] = None,
-    worker_tool: Optional["FunctionTool"] = None,
+    worker_tools: Optional[List["FunctionTool"]] = None,
     tree_tracker: Optional[object] = None,
     max_rounds: int = 10,
 ) -> Tuple[str, Optional["InteractionTracker"]]:
@@ -150,7 +150,7 @@ def run_research(
             main_agent=main_agent,
             search_model=search_model,
             tracker=tracker,
-            search_tool=search_tool,
+            search_tools=search_tools,
             context_plan=context_plan,
             show_status=show_status,
         )
@@ -167,7 +167,7 @@ def run_research(
             exam_model=exam_model,
             tracker=tracker,
             tree_tracker=tree_tracker,
-            worker_tool=worker_tool,
+            worker_tools=worker_tools,
             max_rounds=max_rounds,
             show_status=show_status,
         )

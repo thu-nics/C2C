@@ -1,4 +1,4 @@
-from typing import Tuple, Optional
+from typing import List, Tuple, Optional
 
 from camel.agents import ChatAgent
 from camel.messages import FunctionCallingMessage
@@ -18,22 +18,22 @@ def direct_subagent_research(
     main_agent: ChatAgent,
     search_model: BaseModelBackend,
     tracker: InteractionTracker = None,
-    search_tool: FunctionTool = None,
+    search_tools: List[FunctionTool] = None,
 ) -> Tuple[str, Optional[InteractionTracker]]:
-    """Direct subagent research with a single search tool.
-    
+    """Direct subagent research with search tools.
+
     Args:
         question: The question to answer.
         main_agent: The main agent.
         search_model: The search model.
         tracker: The tracker.
-        search_tool: The search tool. default is Google search.
+        search_tools: List of tools for search agent. Defaults to [Google search].
 
     Returns:
         The response message and the tracker.
     """
-    if search_tool is None:
-        search_tool = FunctionTool(SearchToolkit().search_google)
+    if search_tools is None:
+        search_tools = [FunctionTool(SearchToolkit().search_google)]
 
 
     task = Task(
@@ -50,7 +50,7 @@ def direct_subagent_research(
     for i, subtask in enumerate(subtasks):
         query = subtask.content
         # Create a new search agent for each query
-        search_agent = ChatAgent(system_message=SEARCH_AGENT_PROMPT, model=search_model, tools=[search_tool])
+        search_agent = ChatAgent(system_message=SEARCH_AGENT_PROMPT, model=search_model, tools=search_tools)
         response = search_agent.step(query)
         information = response.msg.content
         information_list.append(information)
@@ -74,22 +74,22 @@ def extend_subagent_research(
     main_agent: ChatAgent,
     search_model: BaseModelBackend,
     tracker: InteractionTracker = None,
-    search_tool: FunctionTool = None,
+    search_tools: List[FunctionTool] = None,
 ) -> Tuple[str, Optional[InteractionTracker]]:
-    """Extend subagent research with a single search tool.
-    
+    """Extend subagent research with search tools.
+
     Args:
         question: The question to answer.
         main_agent: The main agent.
         search_model: The search model.
         tracker: The tracker.
-        search_tool: The search tool. default is Google search.
+        search_tools: List of tools for search agent. Defaults to [Google search].
 
     Returns:
         The response message and the tracker.
     """
-    if search_tool is None:
-        search_tool = FunctionTool(SearchToolkit().search_google)
+    if search_tools is None:
+        search_tools = [FunctionTool(SearchToolkit().search_google)]
 
     task = Task(
         content=question,
@@ -107,7 +107,7 @@ def extend_subagent_research(
     for i, subtask in enumerate(subtasks):
         query = subtask.content
         # Create a new search agent for each query
-        search_agent = ChatAgent(system_message=SEARCH_AGENT_PROMPT, model=search_model, tools=[search_tool])
+        search_agent = ChatAgent(system_message=SEARCH_AGENT_PROMPT, model=search_model, tools=search_tools)
 
         # Expand the context from the main agent's chat history
         search_agent.memory.write_records(camel_messages)
@@ -135,22 +135,22 @@ def extend_sequential_subagent_research(
     main_agent: ChatAgent,
     search_model: BaseModelBackend,
     tracker: InteractionTracker = None,
-    search_tool: FunctionTool = None,
+    search_tools: List[FunctionTool] = None,
 ) -> Tuple[str, Optional[InteractionTracker]]:
-    """Extend subagent research with a single search tool.
-    
+    """Extend subagent research with search tools.
+
     Args:
         question: The question to answer.
         main_agent: The main agent.
         search_model: The search model.
         tracker: The tracker.
-        search_tool: The search tool. default is Google search.
+        search_tools: List of tools for search agent. Defaults to [Google search].
 
     Returns:
         The response message and the tracker.
     """
-    if search_tool is None:
-        search_tool = FunctionTool(SearchToolkit().search_google)
+    if search_tools is None:
+        search_tools = [FunctionTool(SearchToolkit().search_google)]
 
     task = Task(
         content=question,
@@ -170,7 +170,7 @@ def extend_sequential_subagent_research(
     for i, subtask in enumerate(subtasks):
         query = subtask.content
         # Create a new search agent for each query
-        search_agent = ChatAgent(system_message=SEARCH_AGENT_PROMPT, model=search_model, tools=[search_tool])
+        search_agent = ChatAgent(system_message=SEARCH_AGENT_PROMPT, model=search_model, tools=search_tools)
 
         # Expand the context from the main agent's chat history
         # Expand the all previous response from the search agent
@@ -206,22 +206,22 @@ def full_subagent_research(
     main_agent: ChatAgent,
     search_model: BaseModelBackend,
     tracker: InteractionTracker = None,
-    search_tool: FunctionTool = None,
+    search_tools: List[FunctionTool] = None,
 ) -> Tuple[str, Optional[InteractionTracker]]:
-    """Extend subagent research with a single search tool.
-    
+    """Extend subagent research with search tools.
+
     Args:
         question: The question to answer.
         main_agent: The main agent.
         search_model: The search model.
         tracker: The tracker.
-        search_tool: The search tool. default is Google search.
+        search_tools: List of tools for search agent. Defaults to [Google search].
 
     Returns:
         The response message and the tracker.
     """
-    if search_tool is None:
-        search_tool = FunctionTool(SearchToolkit().search_google)
+    if search_tools is None:
+        search_tools = [FunctionTool(SearchToolkit().search_google)]
 
     task = Task(
         content=question,
@@ -240,7 +240,7 @@ def full_subagent_research(
     for i, subtask in enumerate(subtasks):
         query = subtask.content
         # Create a new search agent for each query
-        search_agent = ChatAgent(system_message=SEARCH_AGENT_PROMPT, model=search_model, tools=[search_tool])
+        search_agent = ChatAgent(system_message=SEARCH_AGENT_PROMPT, model=search_model, tools=search_tools)
 
         # Expand the context from the main agent's chat history
         search_agent.memory.write_records(camel_messages)

@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -16,6 +15,7 @@ from typing import Any, Optional
 from datasets import load_dataset
 from transformers import AutoTokenizer
 from tqdm import tqdm
+from dotenv import find_dotenv, load_dotenv
 
 from camel.agents import ChatAgent
 from camel.models import ModelFactory
@@ -105,12 +105,7 @@ def main() -> None:
     args = parser.parse_args()  
 
     # Environment variables (search tools)
-    # NOTE: This project stores keys in a local file; keep behavior consistent with subagent_research.py.
-    from rosetta.workflow.API import FIRECRAWL_API_KEY, GOOGLE_API_KEY, SEARCH_ENGINE_ID
-
-    os.environ["FIRECRAWL_API_KEY"] = FIRECRAWL_API_KEY
-    os.environ["GOOGLE_API_KEY"] = GOOGLE_API_KEY
-    os.environ["SEARCH_ENGINE_ID"] = SEARCH_ENGINE_ID
+    load_dotenv(find_dotenv())
 
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -211,9 +206,9 @@ def main() -> None:
                 pred_raw, tracker = research_func(
                     question=question,
                     main_agent=main_agent,
-                    search_model=search_model, 
+                    search_model=search_model,
                     tracker=tracker,
-                    search_tool=search_tool,
+                    search_tools=[search_tool],
                     context_plan=context_plan,
                     **({"show_status": False} if args.mode == "oneflow" else {}),
                     drop=True,
@@ -263,4 +258,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

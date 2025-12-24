@@ -1,5 +1,5 @@
 import re
-from typing import Tuple, Optional, Any
+from typing import List, Tuple, Optional, Any
 from camel.agents import ChatAgent
 from camel.models import BaseModelBackend
 from camel.toolkits import FunctionTool, SearchToolkit
@@ -59,19 +59,19 @@ def do_research(
     main_agent: ChatAgent,
     search_model: BaseModelBackend,
     tracker: InteractionTracker = None,
-    search_tool: FunctionTool = None,
+    search_tools: List[FunctionTool] = None,
     context_plan: dict = None,
     max_rounds: int = 10,
     show_status: bool = True,
 ) -> Tuple[str, Optional[InteractionTracker]]:
     """Iterative subagent research with task revision loop.
-    
+
     Args:
         question: The question to answer.
         main_agent: The main agent.
         search_model: The search model.
         tracker: The tracker.
-        search_tool: The search tool. default is Google search.
+        search_tools: List of tools for search agent. Defaults to [Google search].
         context_plan: Dict with selectors:
             - 'search_to_main_selector': What memory from search goes to main.
             - 'main_to_search_selector': What memory from main goes to search.
@@ -84,8 +84,8 @@ def do_research(
         The response message and the tracker.
     """
     logger = StatusLogger(enabled=show_status)
-    if search_tool is None:
-        search_tool = FunctionTool(SearchToolkit().search_google)
+    if search_tools is None:
+        search_tools = [FunctionTool(SearchToolkit().search_google)]
     
     # Setup context selectors
     if context_plan is None:
@@ -122,11 +122,11 @@ def do_research(
         
         # Execute round with status display
         with logger.round(round_idx + 1, tasks) as update_response:
-            search_agent = ChatAgent(system_message=SEARCH_AGENT_PROMPT, model=search_model, tools=[search_tool], summarize_threshold=None, step_timeout=3000)
+            search_agent = ChatAgent(system_message=SEARCH_AGENT_PROMPT, model=search_model, tools=search_tools, summarize_threshold=None, step_timeout=3000)
             search_agent.model_backend.models[0].role = "search"
             # Register tools for this search agent
             if tracker is not None:
-                tracker.register_tools(llm_id=round_idx + 1, tools=[search_tool])
+                tracker.register_tools(llm_id=round_idx + 1, tools=search_tools)
             
             # Forward context to search agent
             forward_context, _, _ = main_to_search_selector.select(
@@ -145,7 +145,17 @@ def do_research(
                 search_model.model_config_dict.setdefault("extra_body", {}).setdefault("search", {})["drop_messages"] = drop_msgs
             
             search_resp = search_agent.step(tasks[0])
-            update_response(getattr(search_resp.msg, "content", None))
+
+            # Extract tool names from chat history
+            tools_used = []
+            for msg in search_agent.chat_history:
+                if msg.get("role") == "assistant" and "tool_calls" in msg:
+                    for tc in msg["tool_calls"]:
+                        tool_name = tc.get("function", {}).get("name")
+                        if tool_name and tool_name not in tools_used:
+                            tools_used.append(tool_name)
+
+            update_response(getattr(search_resp.msg, "content", None), tools_used=tools_used if tools_used else None)
             record_interaction(tracker, search_agent.chat_history, llm_id=round_idx + 1)
 
             # Feedback to main agent

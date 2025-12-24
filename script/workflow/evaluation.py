@@ -10,7 +10,6 @@ import argparse
 import csv
 import json
 import multiprocessing as mp
-import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
@@ -21,6 +20,7 @@ import requests
 from datasets import load_dataset
 from transformers import AutoTokenizer
 from rich.progress import Progress, BarColumn, TextColumn, TimeElapsedColumn
+from dotenv import find_dotenv, load_dotenv
 
 from camel.agents import ChatAgent
 from camel.models import ModelFactory
@@ -31,7 +31,6 @@ from rosetta.workflow.selector import ContextSelector
 from rosetta.workflow.track import InteractionTracker, TreeTracker
 from rosetta.workflow.evaluation import extract_answer, exact_match, load_done_ids, run_research
 from rosetta.workflow.retriever import search_engine
-from rosetta.workflow.API import FIRECRAWL_API_KEY, GOOGLE_API_KEY, SEARCH_ENGINE_ID
 
 
 @dataclass
@@ -70,9 +69,7 @@ class EvalConfig:
 
 def setup_env():
     """Setup environment variables."""
-    os.environ["FIRECRAWL_API_KEY"] = FIRECRAWL_API_KEY
-    os.environ["GOOGLE_API_KEY"] = GOOGLE_API_KEY
-    os.environ["SEARCH_ENGINE_ID"] = SEARCH_ENGINE_ID
+    load_dotenv(find_dotenv())
 
 
 def create_context_plan(config: EvalConfig, use_single: bool, use_tree: bool) -> Optional[dict]:
@@ -166,14 +163,14 @@ def evaluate_single(
             main_agent=main_agent,
             search_model=search_model if not use_single else None,
             tracker=tracker,
-            search_tool=search_tool if not use_single else None,
+            search_tools=[search_tool] if not use_single and search_tool else None,
             context_plan=context_plan,
             show_status=False,
             max_rounds=config.max_rounds,
             worker_model=search_model if use_tree else None,
             rewind_model=search_model if use_tree else None,
             exam_model=search_model if use_tree else None,
-            worker_tool=search_tool if use_tree else None,
+            worker_tools=[search_tool] if use_tree and search_tool else None,
             tree_tracker=tree_tracker,
         )
         extracted = extract_answer(pred_raw)
