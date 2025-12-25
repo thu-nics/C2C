@@ -47,7 +47,7 @@ class RosettaModel(nn.Module):
     """
     Drop in replacement for the standard transformers LLM models, like Qwen3ForCausalLM
     """
-    def __init__(self, model_list: List[PreTrainedModel], base_model_idx = 0, projector_list: List[Projector] = [], aggregator_list: List[nn.Module] = [], include_response: bool = False, multi_source_fusion_mode: str = "parallel"):
+    def __init__(self, model_list: List[PreTrainedModel], base_model_idx = 0, projector_list: List[Projector] = [], include_response: bool = False, multi_source_fusion_mode: str = "parallel"):
         super().__init__()
         # model list: a list of model, model 0 by default is the base model
         # projector list: a list of projector
@@ -61,10 +61,8 @@ class RosettaModel(nn.Module):
         device = model_list[base_model_idx].device
         dtype = model_list[base_model_idx].dtype
         self.projector_list = nn.ModuleList(projector_list).to(device=device, dtype=dtype)
-        self.aggregator_list = nn.ModuleList(aggregator_list).to(device=device, dtype=dtype)
 
         self.projector_dict = {}
-        self.aggregator_dict = {}
         self.kv_cache_dict = {}
         self._generation_hook_handlers = []
 
@@ -89,8 +87,6 @@ class RosettaModel(nn.Module):
             model.to(device)
         for projector in self.projector_list:
             projector.to(device)
-        for aggregator in self.aggregator_list:
-            aggregator.to(device)
         return self
         
     # set projector 
@@ -136,10 +132,6 @@ class RosettaModel(nn.Module):
     def load_projector(self, projector_list):
         self.projector_list: List[Projector] = projector_list
 
-    def load_aggregator(self, aggregator_list):
-        self.aggregator_list: List[nn.Module] = aggregator_list
-
-
     def get_projector(self, 
                         source_model_idx, 
                         source_model_layer_idx, 
@@ -154,18 +146,6 @@ class RosettaModel(nn.Module):
                 return self.projector_list[projector_id]
         # Fallback: return the first projector
         return self.projector_list[pair_list[0][1]]
-
-    def set_aggregator_idx(self,
-                           source_model_idx: int,
-                           target_model_idx: int,
-                           target_model_layer_idx: int,
-                           aggregator_idx: int):
-        if target_model_idx not in self.aggregator_dict:
-            self.aggregator_dict[target_model_idx] = {}
-        if source_model_idx not in self.aggregator_dict[target_model_idx]:
-            self.aggregator_dict[target_model_idx][source_model_idx] = {}
-        self.aggregator_dict[target_model_idx][source_model_idx][target_model_layer_idx] = aggregator_idx
-
 
     @staticmethod
     def load_json(file_name):
@@ -202,16 +182,6 @@ class RosettaModel(nn.Module):
         if config_path.endswith(".json"):
             loaded = RosettaModel.load_json(config_path)
             self.projector_dict = RosettaModel._convert_dict_keys_to_ints(loaded)
-
-    def save_aggregator_config(self, file_name):
-        with open(file_name, "w") as f:
-            json.dump(self.aggregator_dict, f)
-
-    def load_aggregator_config(self, config_path):
-        if config_path.endswith(".json"):
-            loaded = RosettaModel.load_json(config_path)
-            self.aggregator_dict = RosettaModel._convert_dict_keys_to_ints(loaded)
-
 
     def set_kv_cache_dict(self, source_model_idx, target_model_idx, cache):
         if target_model_idx not in self.kv_cache_dict.keys():
@@ -353,25 +323,8 @@ class RosettaModel(nn.Module):
                 projected_kv_list.append((projected_key, projected_value))
                 source_kv_list.append(new_source_kv_cache)
 
-            # Aggregate (fallback to first projector if no aggregator is available)
-            use_aggregator = (
-                len(projected_kv_list) > 1 and
-                len(self.aggregator_list) > 0 and
-                self.base_model_idx in self.aggregator_dict and
-                source_model_idx in self.aggregator_dict[self.base_model_idx] and
-                target_layer_idx in self.aggregator_dict[self.base_model_idx][source_model_idx]
-            )
-
-            if use_aggregator:
-                aggregator_idx = self.aggregator_dict[self.base_model_idx][source_model_idx][target_layer_idx]
-                agg_key, agg_value = self.aggregator_list[aggregator_idx].forward(
-                    source_kv_list,
-                    new_base_kv_cache,
-                    projected_kv_list
-                )
-            else:
-                # Fallback to first projector result when no aggregator is available
-                agg_key, agg_value = projected_kv_list[0]
+            # Use first projector result
+            agg_key, agg_value = projected_kv_list[0]
 
             # Update cache
             base_output_kv_cache.key_cache[target_layer_idx][:, :, -new_length:, :] = agg_key
@@ -595,24 +548,8 @@ class RosettaModel(nn.Module):
                                         projected_kv_list.append((projected_key, projected_value))
                                         source_kv_list.append(new_source_kv_cache)
 
-                                    # Aggregate within this source (if multiple projectors per source)
-                                    use_aggregator = (
-                                        len(projected_kv_list) > 1 and
-                                        len(self.aggregator_list) > 0 and
-                                        self.base_model_idx in self.aggregator_dict and
-                                        source_model_idx in self.aggregator_dict[self.base_model_idx] and
-                                        target_layer_idx in self.aggregator_dict[self.base_model_idx][source_model_idx]
-                                    )
-
-                                    if use_aggregator:
-                                        aggregator_idx = self.aggregator_dict[self.base_model_idx][source_model_idx][target_layer_idx]
-                                        agg_key, agg_value = self.aggregator_list[aggregator_idx].forward(
-                                            source_kv_list,
-                                            new_base_kv_cache,
-                                            projected_kv_list
-                                        )
-                                    else:
-                                        agg_key, agg_value = projected_kv_list[0]
+                                    # Use first projector result
+                                    agg_key, agg_value = projected_kv_list[0]
 
                                     # Collect or apply projection based on mode
                                     if self.multi_source_fusion_mode == "sequential":

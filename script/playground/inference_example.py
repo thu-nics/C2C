@@ -226,7 +226,7 @@ def run_inference_example(rosetta_model: RosettaModel, tokenizer: AutoTokenizer,
 def load_rosetta_model(model_config: Dict[str, Any], eval_config: Dict[str, Any], 
                       device: torch.device) -> Tuple[Any, Any]:
     """
-    Load Rosetta model with projectors and aggregators.
+    Load Rosetta model with projectors.
     
     Args:
         model_config: Model configuration dict
@@ -274,32 +274,16 @@ def load_rosetta_model(model_config: Dict[str, Any], eval_config: Dict[str, Any]
             proj.load_state_dict(state_dict, strict=False)
         projector_list.append(proj)
     
-    # Load aggregators
-    num_aggregators = len([f for f in os.listdir(checkpoint_dir) if re.match(r"aggregator_\d+\.pt", f)])
-    aggregator_list = []
-    for t in range(num_aggregators):
-        json_cfg = os.path.join(checkpoint_dir, f"aggregator_{t}.json")
-        agg_path = os.path.join(checkpoint_dir, f"aggregator_{t}.pt")
-        agg = load_aggregator(json_cfg)
-        if os.path.exists(agg_path):
-            sd = torch.load(agg_path, map_location="cpu")
-            agg.load_state_dict(sd, strict=False)
-        agg = agg.to(device)
-        aggregator_list.append(agg)
-    
     # Initialize Rosetta model
     rosetta_model = RosettaModel(
         model_list=[slm_model, llm_model],
         base_model_idx=0,
         projector_list=projector_list,
-        aggregator_list=aggregator_list,
     ).to(device).eval()
 
-    # Load projector/aggregator mapping configs
+    # Load projector mapping configs
     proj_cfg_path = os.path.join(checkpoint_dir, "projector_config.json")
-    agg_cfg_path = os.path.join(checkpoint_dir, "aggregator_config.json")
     rosetta_model.load_projector_config(proj_cfg_path)
-    rosetta_model.load_aggregator_config(agg_cfg_path)
 
     return rosetta_model, slm_tokenizer
 

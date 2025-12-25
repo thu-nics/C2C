@@ -19,7 +19,6 @@ from rosetta.model.projector import create_projector
 from rosetta.model.wrapper import RosettaModel
 from rosetta.train.dataset_adapters import MMLUChatDataset
 from rosetta.model.projector import create_projector, load_projector
-from rosetta.model.aggregator import WeightedAggregator, load_aggregator
 
 def setup_distributed(rank, world_size):
     """初始化分布式环境"""
@@ -42,7 +41,7 @@ def load_hf_model(model_name, device):
 
 def load_rosetta_model(model_config, eval_config, device):
     """加载Rosetta模型"""
-    # Create projectors/aggregators and load from checkpoint
+    # Create projectors and load from checkpoint
     checkpoint_dir = eval_config["checkpoints_dir"]
 
     rosetta_config = model_config["rosetta_config"]
@@ -76,19 +75,6 @@ def load_rosetta_model(model_config, eval_config, device):
             state_dict = torch.load(pt_path, map_location=device)
             proj.load_state_dict(state_dict, strict=False)
         projector_list.append(proj)
-    
-    # Load aggregators
-    num_aggregators = len([f for f in os.listdir(checkpoint_dir) if re.match(r"aggregator_\d+\.pt", f)])
-    aggregator_list = []
-    for t in range(num_aggregators):
-        json_cfg = os.path.join(checkpoint_dir, f"aggregator_{t}.json")
-        agg_path = os.path.join(checkpoint_dir, f"aggregator_{t}.pt")
-        agg = load_aggregator(json_cfg)
-        if os.path.exists(agg_path):
-            sd = torch.load(agg_path, map_location="cpu")
-            agg.load_state_dict(sd, strict=False)
-        agg = agg.to(device)
-        aggregator_list.append(agg)
 
     # shared_key_projection=build_shared_mlp(
     #     source_dim=teacher_dim,
@@ -114,17 +100,12 @@ def load_rosetta_model(model_config, eval_config, device):
         model_list=[slm_model, llm_model],
         base_model_idx=0,
         projector_list=projector_list,
-        aggregator_list=aggregator_list,
     ).to(device).eval()
 
-    # Load projector/aggregator mapping configs saved during training
+    # Load projector mapping configs saved during training
     # Load saved mapping configs (preferred)
     proj_cfg_path = os.path.join(checkpoint_dir, "projector_config.json")
-    agg_cfg_path = os.path.join(checkpoint_dir, "aggregator_config.json")
-    # if os.path.exists(proj_cfg_path):
     rosetta_model.load_projector_config(proj_cfg_path)
-    # if os.path.exists(agg_cfg_path):
-    rosetta_model.load_aggregator_config(agg_cfg_path)
 
     return rosetta_model, slm_tokenizer
 

@@ -179,19 +179,16 @@ class AllInOneProjector(Projector):
     
     Features:
     1. Gate logit granularity: scalar, token-wise, head-wise, or value-wise
-    2. (DISABLED) Selector logit granularity: scalar, token-wise, head-wise, or value-wise
-    3. Key/Value weight granularity: scalar, token-wise, head-wise, or value-wise
-    4. Input-dependent gates and weights via MLP or parameters
-    5. Optional concatenation with combiner networks
-    6. Modern MLP architecture with residual connections and SwiGLU
-    7. Configurable target preservation: choose between traditional blending or simplified projection
-    8. Optional adding of target (self) signal to outputs via add_self
+    2. Key/Value weight granularity: scalar, token-wise, head-wise, or value-wise
+    3. Input-dependent gates and weights via MLP or parameters
+    4. Optional concatenation with combiner networks
+    5. Modern MLP architecture with residual connections and SwiGLU
+    6. Configurable target preservation: choose between traditional blending or simplified projection
+    7. Optional adding of target (self) signal to outputs via add_self
     
     Target Preservation Modes:
-    - preserve_target_weight=True (default): output = (1-weight)*target + gate*selector*weight*projected
-    - preserve_target_weight=False: output = target + gate*selector*weight*projected (no weight coefficient on target)
-    
-    Note: Selector functionality has been disabled/commented out.
+    - preserve_target_weight=True (default): output = (1-weight)*target + gate*weight*projected
+    - preserve_target_weight=False: output = target + gate*weight*projected (no weight coefficient on target)
     """
     
     def __init__(
@@ -266,7 +263,7 @@ class AllInOneProjector(Projector):
         self.use_gumbel = use_gumbel
         self.scalar_temperature = scalar_temperature
 
-        # Temperature annealing for gate only (removed selector temperature)
+        # Temperature annealing for gate
         self.register_buffer("gate_temperature", torch.tensor(initial_temperature, dtype=dtype))
         self.initial_temperature = initial_temperature
         self.final_temperature = final_temperature
@@ -682,7 +679,7 @@ class AllInOneProjector(Projector):
         projected_key = final_projected_key_flat.view(B, N, H_t, D_t).transpose(1, 2)
         projected_value = final_projected_value_flat.view(B, N, H_t, D_t).transpose(1, 2)
         
-        # Generate gates, selectors and weights (may need projected tensors for input features)
+        # Generate gates and weights (may need projected tensors for input features)
         needs_projected_for_gate = self.gate_depends_on_input and self.gate_input_features in [
             "target_projected_key", "target_projected_value", "target_projected_both"
         ]

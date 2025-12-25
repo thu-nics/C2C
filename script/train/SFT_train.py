@@ -356,15 +356,12 @@ def setup_models(model_config: Dict[str, Any], training_mode: str, device: str =
             projector_list.append(projector.to(device))
         
         # Init RosettaModel
-        # Build aggregators from config (optional)
         K = 1
-        aggregator_list = []
 
         rosetta_model = RosettaModel(
             model_list=[base_model, teacher_model],
             base_model_idx=0,
             projector_list=projector_list,
-            aggregator_list=aggregator_list,
             include_response=model_config.get("include_response", False),
             multi_source_fusion_mode=model_config.get("multi_source_fusion_mode", "sequential")
         ).to(device).eval()
@@ -379,16 +376,8 @@ def setup_models(model_config: Dict[str, Any], training_mode: str, device: str =
             raise ValueError(f"Invalid mapping strategy: {model_config['mapping']}")
         print(f"Using {model_config['mapping']} mapping strategy (target: [sources])")
 
-        # set projector and aggregator
+        # set projector
         for target_layer_idx, src_list in source_target_mapping.items():
-            # Only set aggregator index when aggregators exist
-            if len(aggregator_list) > 0:
-                rosetta_model.set_aggregator_idx(
-                    source_model_idx=1,
-                    target_model_idx=0,
-                    target_model_layer_idx=target_layer_idx,
-                    aggregator_idx=target_layer_idx,
-                )
             for source_layer_idx in src_list:
                 rosetta_model.set_projector_config(
                     source_model_idx=1,  # Teacher model
@@ -617,14 +606,6 @@ def main():
                 freeze_model(projector)
         else:
             unfreeze_projectors(model)
-
-        for i, projector in enumerate(model.projector_list):
-            if hasattr(projector, 'selector_depends_on_input') and projector.selector_depends_on_input:
-                # For input-dependent selectors, unfreeze the selector_generator
-                if hasattr(projector, 'selector_generator'):
-                    for param in projector.selector_generator.parameters():
-                        param.requires_grad = False
-                    print(f"froze selector_generator parameters in projector {i}")
 
     # Wrap with DDP if needed
     if distributed:
@@ -855,11 +836,6 @@ def main():
                         if hasattr(proj, 'update_temperature') and callable(proj.update_temperature):
                             proj.update_temperature(global_step)
 
-                    # Anneal aggregator temperatures if supported
-                    for agg in model_to_use.aggregator_list:
-                        if hasattr(agg, 'update_temperature') and callable(agg.update_temperature):
-                            agg.update_temperature(global_step)
-
             # Progress bar and logging
             if is_main_process and did_step:
                 # Calculate fractional epoch based on macro steps
@@ -944,7 +920,6 @@ def main():
                                 torch.save(proj.state_dict(), os.path.join(checkpoint_dir, f"projector_{i}.pt"))
                                 save_projector(proj, os.path.join(checkpoint_dir, f"projector_{i}.json"))
                             base_model_ref.save_projector_config(os.path.join(checkpoint_dir, "projector_config.json"))
-                            base_model_ref.save_aggregator_config(os.path.join(checkpoint_dir, "aggregator_config.json"))
 
                         torch.save({
                             "step": global_step,
@@ -1009,7 +984,6 @@ def main():
                 torch.save(proj.state_dict(), os.path.join(final_dir, f"projector_{i}.pt"))
                 save_projector(proj, os.path.join(final_dir, f"projector_{i}.json"))
             base_model_ref.save_projector_config(os.path.join(final_dir, "projector_config.json"))
-            base_model_ref.save_aggregator_config(os.path.join(final_dir, "aggregator_config.json"))
 
     if is_main_process:
         print("Training completed!")

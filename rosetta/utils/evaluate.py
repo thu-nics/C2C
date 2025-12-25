@@ -326,7 +326,7 @@ def load_hf_model(model_name: str, device: torch.device, generation_config: Opti
 def load_rosetta_model(model_config: Dict[str, Any], eval_config: Dict[str, Any], 
                       device: torch.device, generation_config: Optional[Dict[str, Any]] = None) -> Tuple[Any, Any]:
     """
-    Load Rosetta model with projectors and aggregators.
+    Load Rosetta model with projectors.
     
     Args:
         model_config: Model configuration dict
@@ -399,14 +399,13 @@ def load_rosetta_model(model_config: Dict[str, Any], eval_config: Dict[str, Any]
         apply_generation_config(llm_model, generation_config)
         llm_models.append(llm_model)
     
-     # Load projectors and aggregators for each LLM from their respective checkpoint directories
-    # Each checkpoint directory contains standard format: projector_{idx}.pt, aggregator_{idx}.pt
+     # Load projectors for each LLM from their respective checkpoint directories
+    # Each checkpoint directory contains standard format: projector_{idx}.pt
     projector_list = []
     num_llms = len(llm_models)
     
-    # Track projector/aggregator offset for each LLM (for config index adjustment)
+    # Track projector offset for each LLM (for config index adjustment)
     projector_offsets = [0]
-    aggregator_offsets = [0]
     
     for llm_idx, (_, checkpoint_dir) in enumerate(llm_configs):
         # Load projectors from this LLM's checkpoint directory
@@ -439,22 +438,20 @@ def load_rosetta_model(model_config: Dict[str, Any], eval_config: Dict[str, Any]
         model_list=model_list,
         base_model_idx=0,
         projector_list=projector_list,
-        aggregator_list=[],
         include_response=include_response,
         multi_source_fusion_mode=multi_source_fusion_mode,
     ).to(device).eval()
 
-    # Load projector/aggregator mapping configs from each LLM's checkpoint directory
-    # Each directory has standard config files: projector_config.json, aggregator_config.json
+    # Load projector mapping configs from each LLM's checkpoint directory
+    # Each directory has standard config file: projector_config.json
     
     # Helper function to adjust config indices for flattened lists
-    def adjust_config_indices(config_dict, proj_offset, agg_offset, actual_source_idx=None):
-        """Adjust projector/aggregator indices in config dict by adding offsets.
+    def adjust_config_indices(config_dict, proj_offset, actual_source_idx=None):
+        """Adjust projector indices in config dict by adding offsets.
         
         Args:
             config_dict: Original config dictionary
-            proj_offset: Offset for projector indices (if not None)
-            agg_offset: Offset for aggregator indices (if not None)
+            proj_offset: Offset for projector indices
             actual_source_idx: If provided, remap all source_model_idx to this value
         """
         adjusted = {}
@@ -467,8 +464,8 @@ def load_rosetta_model(model_config: Dict[str, Any], eval_config: Dict[str, Any]
                 for target_layer_idx, mappings in layers.items():
                     adjusted_mappings = []
                     for source_layer_idx, idx in mappings:
-                        # Adjust the projector/aggregator index
-                        adjusted_idx = idx + proj_offset if proj_offset is not None else idx + agg_offset
+                        # Adjust the projector index
+                        adjusted_idx = idx + proj_offset
                         adjusted_mappings.append((source_layer_idx, adjusted_idx))
                     adjusted[int(target_model_idx)][actual_src_idx][int(target_layer_idx)] = adjusted_mappings
         return adjusted
@@ -476,7 +473,6 @@ def load_rosetta_model(model_config: Dict[str, Any], eval_config: Dict[str, Any]
     # Load and merge configs from each LLM's checkpoint directory
     for llm_idx, (_, checkpoint_dir) in enumerate(llm_configs):
         proj_cfg_path = os.path.join(checkpoint_dir, "projector_config.json")
-        agg_cfg_path = os.path.join(checkpoint_dir, "aggregator_config.json")
         
         # Actual source model index in model_list (llm_idx=0 -> model_list[1], llm_idx=1 -> model_list[2], etc.)
         actual_source_model_idx = llm_idx + 1
@@ -486,7 +482,7 @@ def load_rosetta_model(model_config: Dict[str, Any], eval_config: Dict[str, Any]
             with open(proj_cfg_path, 'r') as f:
                 config = json.load(f)
                 # Adjust projector indices based on offset and set actual source_idx
-                adjusted_config = adjust_config_indices(config, projector_offsets[llm_idx], None, actual_source_model_idx)
+                adjusted_config = adjust_config_indices(config, projector_offsets[llm_idx], actual_source_model_idx)
                 # Merge into rosetta_model.projector_dict
                 for target_idx, sources in adjusted_config.items():
                     if target_idx not in rosetta_model.projector_dict:
@@ -502,7 +498,7 @@ def load_rosetta_model(model_config: Dict[str, Any], eval_config: Dict[str, Any]
 def load_oracle_rosetta_model(model_config: Dict[str, Any], eval_config: Dict[str, Any], 
                       device: torch.device) -> Tuple[Any, Any]:
     """
-    Load Rosetta model with projectors and aggregators.
+    Load Rosetta model with projectors.
     
     Args:
         model_config: Model configuration dict
@@ -550,21 +546,16 @@ def load_oracle_rosetta_model(model_config: Dict[str, Any], eval_config: Dict[st
             proj.load_state_dict(state_dict, strict=False)
         projector_list.append(proj)
     
-    aggregator_list = []
-    
     # Initialize Rosetta model
     rosetta_model = OracleRosettaModel(
         model_list=[slm_model, llm_model],
         base_model_idx=0,
         projector_list=projector_list,
-        aggregator_list=aggregator_list,
     ).to(device).eval()
 
-    # Load projector/aggregator mapping configs
+    # Load projector mapping configs
     proj_cfg_path = os.path.join(checkpoint_dir, "projector_config.json")
-    agg_cfg_path = os.path.join(checkpoint_dir, "aggregator_config.json")
     rosetta_model.load_projector_config(proj_cfg_path)
-    rosetta_model.load_aggregator_config(agg_cfg_path)
 
     return rosetta_model, slm_tokenizer
 

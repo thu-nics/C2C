@@ -30,7 +30,6 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '../..'))
 
 from rosetta.model.wrapper import RosettaModel
 from rosetta.model.projector import create_projector, save_projector, TrivialProjector
-from rosetta.model.aggregator import save_aggregator, get_aggregator_class
 from rosetta.train.dataset_adapters import ChatDataset, RosettaDataCollator, create_dataset
 from rosetta.train.model_utils import k_nearest_sources, last_aligned_sources
 
@@ -181,13 +180,11 @@ def setup_models(model_config: Dict[str, Any], device: str = "cuda", dtype: torc
             projector_list.append(projector.to(device))
     
     K = 1
-    aggregator_list = []
 
     rosetta_model = RosettaModel(
         model_list=[base_model, teacher_model],
         base_model_idx=0,
         projector_list=projector_list,
-        aggregator_list=aggregator_list,
     ).to(device).eval()
     
     if model_config["mapping"] == "last_aligned":
@@ -199,14 +196,6 @@ def setup_models(model_config: Dict[str, Any], device: str = "cuda", dtype: torc
     print(f"Using {model_config['mapping']} mapping strategy (target: [sources])")
 
     for target_layer_idx, src_list in source_target_mapping.items():
-        # if target_layer_idx == chosen_target_layer_idx:
-        if len(aggregator_list) > 0:
-            rosetta_model.set_aggregator_idx(
-                source_model_idx=1,
-                target_model_idx=0,
-                target_model_layer_idx=target_layer_idx,
-                aggregator_idx=0,
-            )
         for source_layer_idx in src_list:
             rosetta_model.set_projector_config(
                 source_model_idx=1,
@@ -513,10 +502,6 @@ def main():
                 if hasattr(proj, 'update_temperature') and callable(proj.update_temperature):
                     proj.update_temperature(batch_idx)
 
-            for agg in model_to_use.aggregator_list:
-                if hasattr(agg, 'update_temperature') and callable(agg.update_temperature):
-                    agg.update_temperature(batch_idx)
-
             is_accum_step = ((batch_idx + 1) % grad_accum_steps) != 0
             sync_ctx = rosetta_model.no_sync() if distributed and hasattr(rosetta_model, "no_sync") and is_accum_step else contextlib.nullcontext()
 
@@ -603,11 +588,7 @@ def main():
                         for i, proj in enumerate(base_model_ref.projector_list):
                             torch.save(proj.state_dict(), os.path.join(checkpoint_dir, f"projector_{i}.pt"))
                             save_projector(proj, os.path.join(checkpoint_dir, f"projector_{i}.json"))
-                        for i, agg in enumerate(base_model_ref.aggregator_list):
-                            torch.save(agg.state_dict(), os.path.join(checkpoint_dir, f"aggregator_{i}.pt"))
-                            save_aggregator(agg, os.path.join(checkpoint_dir, f"aggregator_{i}.json"))
                         base_model_ref.save_projector_config(os.path.join(checkpoint_dir, "projector_config.json"))
-                        base_model_ref.save_aggregator_config(os.path.join(checkpoint_dir, "aggregator_config.json"))
 
                         torch.save({
                             "step": global_step,
@@ -651,11 +632,7 @@ def main():
         for i, proj in enumerate(base_model_ref.projector_list):
             torch.save(proj.state_dict(), os.path.join(final_dir, f"projector_{i}.pt"))
             save_projector(proj, os.path.join(final_dir, f"projector_{i}.json"))
-        for i, agg in enumerate(base_model_ref.aggregator_list):
-            torch.save(agg.state_dict(), os.path.join(final_dir, f"aggregator_{i}.pt"))
-            save_aggregator(agg, os.path.join(final_dir, f"aggregator_{i}.json"))
         base_model_ref.save_projector_config(os.path.join(final_dir, "projector_config.json"))
-        base_model_ref.save_aggregator_config(os.path.join(final_dir, "aggregator_config.json"))
 
     if is_main_process:
         print("Training completed!")
