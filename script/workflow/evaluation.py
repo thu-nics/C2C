@@ -20,17 +20,21 @@ import requests
 from datasets import load_dataset
 from transformers import AutoTokenizer
 from rich.progress import Progress, BarColumn, TextColumn, TimeElapsedColumn
+from rich.console import Console
+from rich.table import Table
 from dotenv import find_dotenv, load_dotenv
 
 from camel.agents import ChatAgent
 from camel.models import ModelFactory
-from camel.types import ModelPlatformType
-from camel.toolkits import FunctionTool
+from camel.types import ModelPlatformType, ModelType
+from camel.toolkits import FunctionTool, SearchToolkit
+from camel.configs import ChatGPTConfig
 
 from rosetta.workflow.selector import ContextSelector
 from rosetta.workflow.track import InteractionTracker, TreeTracker
 from rosetta.workflow.evaluation import extract_answer, exact_match, load_done_ids, run_research
 from rosetta.workflow.retriever import search_engine
+from rosetta.workflow.prompt import ERROR_CATEGORIES, ERROR_CATEGORIZATION_PROMPT, LLM_JUDGE_PROMPT
 
 
 @dataclass
@@ -44,6 +48,7 @@ class EvalRecord:
     llm0_messages: Optional[list[dict[str, Any]]]
     correct_em: bool
     seconds: float
+    tools_used: Optional[list[list[str]]] = None
     error: Optional[str] = None
 
 
@@ -65,6 +70,8 @@ class EvalConfig:
     search_to_main: str
     main: str
     num_workers: int
+    eval_api_url: Optional[str] = None  # API URL for LLM judge, defaults to model_url
+    eval_model_type: Optional[str] = None  # Model type for LLM judge, defaults to model_type
 
 
 def setup_env():
@@ -130,7 +137,7 @@ def evaluate_single(
     model,
     search_model,
     tokenizer,
-    search_tool: FunctionTool,
+    tools: list[FunctionTool],
 ) -> EvalRecord:
     """Evaluate a single example."""
     hotpot_id = str(ex["id"])
@@ -141,11 +148,11 @@ def evaluate_single(
     use_tree = config.mode == "tree"
 
     tracker = InteractionTracker(tokenizer=tokenizer)
-    tools = [search_tool] if use_single else None
+    agent_tools = tools if use_single else None
     main_agent = ChatAgent(
         system_message="You are a helpful assistant.",
         model=model,
-        tools=tools
+        tools=agent_tools
     )
     tree_tracker = TreeTracker() if use_tree else None
     context_plan = create_context_plan(config, use_single, use_tree)
@@ -163,14 +170,14 @@ def evaluate_single(
             main_agent=main_agent,
             search_model=search_model if not use_single else None,
             tracker=tracker,
-            search_tools=[search_tool] if not use_single and search_tool else None,
+            search_tools=tools if not use_single else None,
             context_plan=context_plan,
             show_status=False,
             max_rounds=config.max_rounds,
             worker_model=search_model if use_tree else None,
             rewind_model=search_model if use_tree else None,
             exam_model=search_model if use_tree else None,
-            worker_tools=[search_tool] if use_tree and search_tool else None,
+            worker_tools=tools if use_tree else None,
             tree_tracker=tree_tracker,
         )
         extracted = extract_answer(pred_raw)
@@ -185,6 +192,14 @@ def evaluate_single(
     seconds = time.time() - t0
     is_correct = exact_match(pred, gold) if err is None else False
 
+    # Get tools used per round from tree_tracker
+    tools_used_per_round: Optional[list[list[str]]] = None
+    if tree_tracker is not None:
+        try:
+            tools_used_per_round = tree_tracker.get_tools_per_round()
+        except Exception:
+            tools_used_per_round = None
+
     return EvalRecord(
         idx=idx,
         hotpot_id=hotpot_id,
@@ -195,6 +210,7 @@ def evaluate_single(
         llm0_messages=llm0_messages,
         correct_em=is_correct,
         seconds=seconds,
+        tools_used=tools_used_per_round,
         error=err,
     )
 
@@ -204,6 +220,7 @@ def worker_process(
     examples: list[dict],
     config: EvalConfig,
     process_dir: Path,
+    tool_funcs: list[Callable],
 ) -> None:
     """Worker process that evaluates a chunk of examples."""
     setup_env()
@@ -219,8 +236,13 @@ def worker_process(
         api_key="not-needed",
         url=config.model_url,
     )
+    # model = ModelFactory.create(
+    #     model_platform=ModelPlatformType.OPENAI,
+    #     model_type=ModelType.GPT_4_1,
+    #     model_config_dict=ChatGPTConfig().as_dict()
+    # )
     tokenizer = AutoTokenizer.from_pretrained(config.tokenizer)
-    search_tool = FunctionTool(search_engine)
+    tools = [FunctionTool(func) for func in tool_funcs]
     output_file = process_dir / f"worker_{worker_id}.jsonl"
 
     with output_file.open("w", encoding="utf-8") as f:
@@ -232,7 +254,7 @@ def worker_process(
                 model=model,
                 search_model=model,
                 tokenizer=tokenizer,
-                search_tool=search_tool,
+                tools=tools,
             )
             f.write(json.dumps(asdict(rec), ensure_ascii=False) + "\n")
             f.flush()
@@ -295,28 +317,138 @@ def _evaluate_single_answer(rec: dict, api_url: str, model_type: str, prompt_tem
         result = response.json()
         content = result["choices"][0]["message"]["content"]
         judgment = content.strip().upper()
-        is_correct = "YES" in judgment
+        is_correct = "CORRECT" in judgment and "INCORRECT" not in judgment
         rec["correct_llm"] = is_correct
         return rec, is_correct
-    except Exception as e:
+    except Exception:
         rec["correct_llm"] = False
         return rec, False
 
 
+def _categorize_single_error(rec: dict, api_url: str, model_type: str) -> tuple[dict, str]:
+    """Categorize error for a single incorrect answer via SGLang API."""
+    # Format chat history for analysis
+    chat_history = ""
+    if rec.get("llm0_messages"):
+        for i, msg in enumerate(rec["llm0_messages"], 1):
+            role = msg["role"].upper()
+            content = msg["content"]
+            # Truncate very long messages
+            if len(content) > 1000:
+                content = content[:1000] + "... [truncated]"
+            chat_history += f"[{i}] {role}:\n{content}\n\n"
+
+    # Build category list from ERROR_CATEGORIES
+    category_list = "\n".join([
+        f"{i}. **{cat}** - {desc}"
+        for i, (cat, desc) in enumerate(ERROR_CATEGORIES.items(), 1)
+    ])
+
+    prompt = ERROR_CATEGORIZATION_PROMPT.format(
+        question=rec["question"],
+        gold_answer=rec["gold_answer"],
+        pred_answer=rec["pred_answer"],
+        chat_history=chat_history if chat_history else "No chat history available",
+        category_list=category_list,
+    )
+
+    request_data = {
+        "model": model_type,
+        "messages": [
+            {"role": "system", "content": "You are an expert evaluator analyzing LLM research workflow failures."},
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.0,
+        "max_tokens": 1024,
+    }
+
+    try:
+        response = requests.post(api_url, json=request_data, timeout=60)
+        response.raise_for_status()
+        result = response.json()
+        content = result["choices"][0]["message"]["content"].strip()
+
+        # Extract category from response
+        category = "Unknown"
+        for cat in ERROR_CATEGORIES.keys():
+            if cat.lower() in content.lower():
+                category = cat
+                break
+
+        rec["error_category"] = category
+        return rec, category
+    except Exception:
+        rec["error_category"] = "Unknown"
+        return rec, "Unknown"
+
+
+def llm_categorize_errors(jsonl_path: Path, config: EvalConfig, max_workers: int = 32) -> dict[str, list]:
+    """Use LLM to categorize error reasons for incorrect answers based on full chat history."""
+    # Read all records
+    records = []
+    with jsonl_path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                try:
+                    records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+
+    # Prepare records for categorization (only incorrect ones)
+    incorrect_records = [rec for rec in records if not rec.get("correct_llm", False) and rec.get("error") is None]
+
+    # Initialize categories for records with errors
+    for rec in records:
+        if rec.get("error") is not None:
+            rec["error_category"] = "System Error"
+        elif rec.get("correct_llm", False):
+            rec["error_category"] = "N/A"
+
+    # Use eval-specific API URL and model type, or fallback to main config
+    eval_base_url = config.eval_api_url or config.model_url
+    eval_model = config.eval_model_type or config.model_type
+    api_url = f"{eval_base_url.rstrip('/')}/chat/completions"
+    category_counts = {}
+
+    # Concurrent categorization with progress bar
+    with Progress(
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+        TextColumn("({task.completed}/{task.total})"),
+        TimeElapsedColumn(),
+    ) as progress:
+        task = progress.add_task("Categorizing errors", total=len(incorrect_records))
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(_categorize_single_error, rec, api_url, eval_model): rec
+                for rec in incorrect_records
+            }
+
+            for future in as_completed(futures):
+                try:
+                    rec, category = future.result()
+                    if category not in category_counts:
+                        category_counts[category] = []
+                    category_counts[category].append(rec)
+                    progress.update(task, advance=1)
+                except Exception as e:
+                    progress.update(task, advance=1)
+                    print(f"Categorization error: {e}")
+
+    # Write updated records
+    with jsonl_path.open("w", encoding="utf-8") as f:
+        for rec in records:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+    return category_counts
+
+
 def llm_evaluate_answers(jsonl_path: Path, config: EvalConfig, max_workers: int = 32) -> tuple[int, int]:
     """Use LLM to evaluate answer correctness with concurrent requests to SGLang backend."""
-    eval_prompt_template = """Question: {question}
-
-Gold Answer: {gold_answer}
-
-Predicted Answer: {pred_answer}
-
-Are these answers semantically equivalent? Consider:
-- Same factual information (even if worded differently)
-- Numerical equivalence
-- Paraphrasing
-
-Answer with ONLY 'YES' or 'NO'."""
+    eval_prompt_template = LLM_JUDGE_PROMPT
 
     # Read all records
     records = []
@@ -337,23 +469,35 @@ Answer with ONLY 'YES' or 'NO'."""
 
     total_llm = len(eval_records)
     correct_llm = 0
-    api_url = f"{config.model_url.rstrip('/')}/chat/completions"
+    # Use eval-specific API URL and model type, or fallback to main config
+    eval_base_url = config.eval_api_url or config.model_url
+    eval_model = config.eval_model_type or config.model_type
+    api_url = f"{eval_base_url.rstrip('/')}/chat/completions"
 
-    # Concurrent evaluation (SGLang handles batching internally)
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {
-            executor.submit(_evaluate_single_answer, rec, api_url, config.model_type, eval_prompt_template): rec
-            for rec in eval_records
-        }
+    # Concurrent evaluation with progress bar
+    with Progress(
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+        TextColumn("({task.completed}/{task.total})"),
+        TimeElapsedColumn(),
+    ) as progress:
+        task = progress.add_task("Evaluating answers", total=total_llm)
 
-        for i, future in enumerate(as_completed(futures), 1):
-            try:
-                rec, is_correct = future.result()
-                correct_llm += int(is_correct)
-                if i % 10 == 0 or i == total_llm:
-                    print(f"LLM evaluation progress: {i}/{total_llm}")
-            except Exception as e:
-                print(f"Evaluation error: {e}")
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(_evaluate_single_answer, rec, api_url, eval_model, eval_prompt_template): rec
+                for rec in eval_records
+            }
+
+            for future in as_completed(futures):
+                try:
+                    rec, is_correct = future.result()
+                    correct_llm += int(is_correct)
+                    progress.update(task, advance=1)
+                except Exception as e:
+                    progress.update(task, advance=1)
+                    print(f"Evaluation error: {e}")
 
     # Write updated records
     with jsonl_path.open("w", encoding="utf-8") as f:
@@ -372,7 +516,7 @@ def write_output_files(jsonl_path: Path, output_path: Path, output_format: str) 
     # Write CSV
     csv_path = output_path.with_suffix(".csv")
     csv_fields = ["idx", "hotpot_id", "question", "gold_answer", "pred_answer", "pred_raw",
-                  "correct_em", "correct_llm", "seconds", "error"]
+                  "correct_em", "correct_llm", "error_category", "tools_used", "seconds", "error"]
 
     with jsonl_path.open("r", encoding="utf-8") as fin, csv_path.open("w", encoding="utf-8", newline="") as fout:
         writer = csv.DictWriter(fout, fieldnames=csv_fields)
@@ -384,6 +528,9 @@ def write_output_files(jsonl_path: Path, output_path: Path, output_format: str) 
             try:
                 obj = json.loads(line)
                 row = {k: obj.get(k) for k in csv_fields}
+                # Convert tools_used list to JSON string for CSV
+                if row.get("tools_used") is not None:
+                    row["tools_used"] = json.dumps(row["tools_used"])
                 writer.writerow(row)
             except json.JSONDecodeError:
                 continue
@@ -428,6 +575,8 @@ def main() -> None:
     parser.add_argument("--search_to_main", type=str, default="qr", choices=["all", "qr"])
     parser.add_argument("--main", type=str, default="all", choices=["all", "none", "qr"])
     parser.add_argument("--num-workers", type=int, default=4, help="Number of parallel workers")
+    parser.add_argument("--eval-api-url", type=str, default="http://localhost:30000/v1", help="API URL for LLM judge")
+    parser.add_argument("--eval-model-type", type=str, default="default", help="Model type for LLM judge")
     args = parser.parse_args()
 
     config = EvalConfig(
@@ -447,6 +596,8 @@ def main() -> None:
         search_to_main=args.search_to_main,
         main=args.main,
         num_workers=args.num_workers,
+        eval_api_url=args.eval_api_url,
+        eval_model_type=args.eval_model_type,
     )
 
     config.output.parent.mkdir(parents=True, exist_ok=True)
@@ -478,6 +629,13 @@ def main() -> None:
         print("No new examples to evaluate.")
         return
 
+    # Define tools as list of callables
+    tool_funcs: list[Callable] = []
+    tool_funcs.append(search_engine)
+    # tool_funcs.append(SearchToolkit().search_wiki)
+    # tool_funcs.append(SearchToolkit().search_google)
+    # tool_funcs.append(SearchToolkit().search_tavily)
+
     # Split examples into chunks
     num_workers = min(config.num_workers, len(examples))
     chunk_size = (len(examples) + num_workers - 1) // num_workers
@@ -486,7 +644,7 @@ def main() -> None:
     # Start workers
     processes = []
     for worker_id, chunk in enumerate(chunks):
-        p = mp.Process(target=worker_process, args=(worker_id, chunk, config, process_dir))
+        p = mp.Process(target=worker_process, args=(worker_id, chunk, config, process_dir, tool_funcs))
         p.start()
         processes.append(p)
 
@@ -535,6 +693,10 @@ def main() -> None:
     # LLM-based evaluation
     print("\nRunning LLM-based evaluation...")
     total_llm, correct_llm = llm_evaluate_answers(final_jsonl, config)
+
+    # Error categorization
+    print("\nCategorizing errors...")
+    category_counts = llm_categorize_errors(final_jsonl, config)
 
     # Write final output files with updated records
     write_output_files(final_jsonl, config.output, config.output_format)
@@ -610,6 +772,21 @@ def main() -> None:
                 "",
             ])
 
+    # Add error category statistics to summary
+    summary_lines.append("Error Category Analysis:")
+    summary_lines.append("")
+    summary_lines.append(f"{'Rank':<6} {'Category':<35} {'Count':<15} {'Percentage':<10}")
+    summary_lines.append("-" * 80)
+
+    total_incorrect = sum(len(examples) for examples in category_counts.values())
+    sorted_categories = sorted(category_counts.items(), key=lambda x: len(x[1]), reverse=True)
+
+    for rank, (category, examples) in enumerate(sorted_categories, 1):
+        count = len(examples)
+        percentage = (count / total_incorrect * 100) if total_incorrect > 0 else 0
+        summary_lines.append(f"{rank:<6} {category:<35} {count}/{total_incorrect:<13} {percentage:.1f}%")
+
+    summary_lines.append("")
     summary_lines.append("=" * 80)
 
     summary_path = config.output.parent / "summary.txt"
@@ -621,6 +798,35 @@ def main() -> None:
     print(f"Output: {config.output}")
     print(f"CSV: {csv_path}")
     print(f"Summary: {summary_path}")
+
+    # Print error category statistics with rich table
+    console = Console()
+    console.print("\n[bold]ERROR CATEGORY ANALYSIS[/bold]\n")
+
+    total_incorrect = sum(len(examples) for examples in category_counts.values())
+
+    # Create table
+    table = Table(show_header=True, header_style="bold cyan", title="Error Distribution")
+    table.add_column("Rank", style="dim", width=6)
+    table.add_column("Category", style="magenta", min_width=30)
+    table.add_column("Count", justify="right", style="green")
+    table.add_column("Percentage", justify="right", style="yellow")
+
+    # Sort by count (descending)
+    sorted_categories = sorted(category_counts.items(), key=lambda x: len(x[1]), reverse=True)
+
+    for rank, (category, examples) in enumerate(sorted_categories, 1):
+        count = len(examples)
+        percentage = (count / total_incorrect * 100) if total_incorrect > 0 else 0
+        table.add_row(
+            f"{rank}",
+            category,
+            f"{count}/{total_incorrect}",
+            f"{percentage:.1f}%"
+        )
+
+    console.print(table)
+    console.print()
 
 
 if __name__ == "__main__":

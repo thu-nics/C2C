@@ -704,6 +704,7 @@ class TreeTracker:
         self._rewinds: list[tuple[int, int, str]] = []  # (from_node_id, to_step_idx, summary)
         self._current_path: list[int] = []  # list of node_ids in current execution path
         self._step_to_node: dict[int, int] = {}  # step_idx -> node_id for execute nodes
+        self._tools_per_round: list[list[str]] = []  # tools used per round
 
     def get_current_parent(self) -> Optional[int]:
         """Return the node_id of the current parent (last node in path), or None if empty."""
@@ -752,6 +753,23 @@ class TreeTracker:
     def register_step(self, step_idx: int, node_id: int):
         """Register mapping from step_idx to node_id for execute nodes."""
         self._step_to_node[step_idx] = node_id
+
+    def record_tools_used(self, tools: list[str]):
+        """Record tools used in the current round."""
+        self._tools_per_round.append(tools if tools else [])
+
+    def get_tools_per_round(self) -> list[list[str]]:
+        """Return list of tools used per round."""
+        return list(self._tools_per_round)
+
+    def get_all_tools_used(self) -> list[str]:
+        """Return flat list of all unique tools used across all rounds."""
+        all_tools = []
+        for tools in self._tools_per_round:
+            for tool in tools:
+                if tool not in all_tools:
+                    all_tools.append(tool)
+        return all_tools
 
     def get_current_path(self) -> list[int]:
         """Return the current path from root to current node."""

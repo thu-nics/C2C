@@ -105,3 +105,58 @@ SEARCH_AGENT_PROMPT = """You are a helpful search agent. Given a subtask, comple
 - Answering directly if you already know the answer.
 
 Provide a concise summary of your findings or answer."""
+
+
+# Error categorization for workflow evaluation
+ERROR_CATEGORIES = {
+    "Search Strategy Failure": "Poor/vague search queries, gave up too early, didn't try alternative search terms",
+    "Information Not Retrieved": "Searched appropriately but needed information not found by search engine",
+    "Retrieved Wrong Information": "Search engine returned incorrect/misleading facts that model trusted",
+    "Retrieved Related But Wrong Entity": "Found similar/related entity instead of the correct one",
+    "Information Retrieved But Ignored": "Had correct information in chat history but didn't use it in final answer",
+    "Multi-Hop Reasoning Failure": "Failed to properly connect information across multiple search hops",
+    "Question Misinterpretation": "Fundamentally misunderstood what the question was asking",
+    "Answer Extraction Error": "Had correct understanding but formatted/extracted answer incorrectly (too verbose, too brief, wrong specificity)",
+    "Premature Conclusion": "Concluded without sufficient verification or additional needed searches",
+}
+
+ERROR_CATEGORIZATION_PROMPT = """Analyze this multi-agent research workflow that produced an incorrect answer.
+
+Question: {question}
+Gold Answer: {gold_answer}
+Predicted Answer: {pred_answer}
+
+FULL CHAT HISTORY:
+{chat_history}
+
+Categorize the PRIMARY reason for failure into ONE category:
+
+{category_list}
+
+Respond with ONLY the category name."""
+
+LLM_JUDGE_PROMPT = """You are comparing a predicted answer to a gold (reference) answer. Your task is to determine if they convey the SAME meaning.
+
+IMPORTANT: Do NOT use your own knowledge to verify factual correctness. Only compare whether the two answers match each other semantically.
+
+Question (for context only): {question}
+
+Gold Answer: {gold_answer}
+
+Predicted Answer: {pred_answer}
+
+Judge if the Predicted Answer matches the Gold Answer by checking:
+- Do they refer to the same entity, person, place, or concept?
+- Are they numerically equivalent (e.g., "1,000" vs "1000", "50%" vs "half")?
+- Are they paraphrases expressing the same meaning?
+- For yes/no answers: "yes" only matches "yes", and "no" only matches "no" - opposites are INCORRECT
+
+Ignore differences in:
+- Capitalization, punctuation, or minor formatting
+- Extra context or explanation (if core answer matches)
+- Phrasing variations that preserve meaning
+
+Reply 'CORRECT' if the Predicted Answer conveys the same meaning as the Gold Answer.
+Reply 'INCORRECT' if they refer to different things, give conflicting information, or are opposites.
+
+Your response must be ONLY 'CORRECT' or 'INCORRECT'."""

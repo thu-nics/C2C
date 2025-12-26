@@ -7,6 +7,10 @@ from typing import Tuple, Optional, List, Any, Dict
 from camel.agents import ChatAgent
 from camel.models import BaseModelBackend
 from camel.toolkits import FunctionTool, SearchToolkit
+from camel.models import ModelFactory
+from camel.types import ModelPlatformType, ModelType
+from camel.configs import ChatGPTConfig
+
 from rosetta.workflow.tree_prompt import (
     INIT_PROMPT, REWIND_PROMPT, EXAM_PROMPT, SELECT_PROMPT, build_decision_prompt
 )
@@ -14,6 +18,12 @@ from rosetta.workflow.prompt import SEARCH_AGENT_PROMPT as WORKER_PROMPT
 from rosetta.workflow.track import InteractionTracker, record_interaction
 from rosetta.workflow.display import StatusLogger
 from rosetta.workflow.camel_utils import messages_to_memoryRecords
+
+# select_model = ModelFactory.create(
+#     model_platform=ModelPlatformType.OPENAI,
+#     model_type=ModelType.GPT_4_1,
+#     model_config_dict=ChatGPTConfig().as_dict()
+# )
 
 
 @dataclass
@@ -335,9 +345,10 @@ def do_wide_execute(
     )
 
     # Use select agent to pick best response
+    select_model = worker_model
     select_agent = ChatAgent(
         system_message="You select the best response among multiple tool outputs.",
-        model=worker_model
+        model=select_model
     )
     select_prompt = SELECT_PROMPT.format(
         question=question,
@@ -352,7 +363,7 @@ def do_wide_execute(
         selected_idx = 1
 
     selected_tool, selected_feedback = results[selected_idx - 1]
-    tools_used = [name for name, _ in results]
+    # tools_used = [name for name, _ in results]
 
     return StateResult(
         feedback=selected_feedback,
@@ -643,8 +654,8 @@ def do_tree_research(
                 tasks_at_step[end_idx] = list(tasks)
                 if tree_tracker is not None:
                     tree_tracker.register_step(end_idx, node_id - 1)
-                # result = do_execute(data["task"], worker_model, worker_tools, tracker, end_idx)
-                result = do_wide_execute(data["task"], worker_model, worker_tools, question, tracker, end_idx)
+                result = do_execute(data["task"], worker_model, worker_tools, tracker, end_idx)
+                # result = do_wide_execute(data["task"], worker_model, worker_tools, question, tracker, end_idx)
                 tasks = tasks[1:] if tasks else []
                 end_idx += 1
 
@@ -663,7 +674,12 @@ def do_tree_research(
                 break  # Unknown state
 
             # Update status display
-            update_status(result.feedback, tools_used=result.kwargs.get("tools_used"))
+            tools_used = result.kwargs.get("tools_used")
+            update_status(result.feedback, tools_used=tools_used)
+
+            # Record tools used for this round
+            if tree_tracker is not None:
+                tree_tracker.record_tools_used(tools_used or [])
 
             # Post-process kwargs (special handling)
             if "rewind_to" in result.kwargs:

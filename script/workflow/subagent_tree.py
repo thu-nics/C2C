@@ -6,12 +6,13 @@ CUDA_VISIBLE_DEVICES=0,1 python -m sglang.launch_server --model-path Qwen/Qwen3-
 """
 
 from transformers import AutoTokenizer
+from dotenv import find_dotenv, load_dotenv
 
 from camel.agents import ChatAgent
 from camel.models import ModelFactory
-from camel.types import ModelPlatformType
+from camel.types import ModelPlatformType, ModelType
 from camel.toolkits import FunctionTool, SearchToolkit
-from dotenv import find_dotenv, load_dotenv
+from camel.configs import ChatGPTConfig
 
 from rosetta.workflow.track import InteractionTracker, TreeTracker
 from rosetta.workflow.treeflow import do_tree_research
@@ -28,6 +29,14 @@ model = ModelFactory.create(
     api_key="not-needed",
     url="http://localhost:30000/v1",
 )
+
+# model = ModelFactory.create(
+#     model_platform=ModelPlatformType.OPENAI,
+#     # model_type=ModelType.GPT_5_NANO,
+#     # model_config_dict=ChatGPTConfig(reasoning_effort="minimal").as_dict(),
+#     model_type=ModelType.GPT_4_1,
+#     model_config_dict=ChatGPTConfig().as_dict()
+# )
 
 worker_model = model
 rewind_model = model
@@ -46,16 +55,16 @@ if __name__ == "__main__":
     # Choose search tool
     tools = []
     tools.append(FunctionTool(search_engine))
-    tools.append(FunctionTool(SearchToolkit().search_wiki))  # successful
+    # tools.append(FunctionTool(SearchToolkit().search_wiki))  # successful
     # tools.append(FunctionTool(SearchToolkit().search_brave))  # successful, but rate limited
-    tools.append(FunctionTool(SearchToolkit().search_google))  # successful
-    tools.append(FunctionTool(SearchToolkit().search_tavily))  # successful
+    # tools.append(FunctionTool(SearchToolkit().search_google))  # successful
+    # tools.append(FunctionTool(SearchToolkit().search_tavily))  # successful
     # tools.append(FunctionTool(SearchToolkit().search_exa))  # successful
     # tools.append(FunctionTool(SearchToolkit().search_alibaba_tongxiao))  # successful
     # tools.append(FunctionTool(SearchToolkit().search_metaso))  # successful
 
-    question = "Which performance act has a higher instrument to person ratio, Badly Drawn Boy or Wolf Alice?"
-    # question = "A Japanese manga series based on a 16 year old high school student Ichitaka Seto, is written and illustrated by someone born in what year?"
+    # question = "Which performance act has a higher instrument to person ratio, Badly Drawn Boy or Wolf Alice?"
+    question = "A Japanese manga series based on a 16 year old high school student Ichitaka Seto, is written and illustrated by someone born in what year?"
 
     response, tracker = do_tree_research(
         question=question,
