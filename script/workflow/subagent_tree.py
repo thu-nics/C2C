@@ -65,8 +65,8 @@ if __name__ == "__main__":
 
     # Choose search tool
     tools = []
-    # tools.append(FunctionTool(search_engine))
-    tools.append(FunctionTool(SearchToolkit().search_wiki))  # successful
+    tools.append(FunctionTool(search_engine))
+    # tools.append(FunctionTool(SearchToolkit().search_wiki))  # successful
     # tools.append(FunctionTool(SearchToolkit().search_brave))  # successful, but rate limited
     # tools.append(FunctionTool(SearchToolkit().search_google))  # successful
     # tools.append(FunctionTool(SearchToolkit().search_tavily))  # successful
@@ -74,8 +74,8 @@ if __name__ == "__main__":
     # tools.append(FunctionTool(SearchToolkit().search_alibaba_tongxiao))  # successful
     # tools.append(FunctionTool(SearchToolkit().search_metaso))  # successful
 
-    question = "Which performance act has a higher instrument to person ratio, Badly Drawn Boy or Wolf Alice?"
-    # question = "A Japanese manga series based on a 16 year old high school student Ichitaka Seto, is written and illustrated by someone born in what year?"
+    # question = "Which performance act has a higher instrument to person ratio, Badly Drawn Boy or Wolf Alice?"
+    question = "A Japanese manga series based on a 16 year old high school student Ichitaka Seto, is written and illustrated by someone born in what year?"
 
     response, tracker = do_tree_research(
         question=question,

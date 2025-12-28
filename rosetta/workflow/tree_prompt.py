@@ -27,7 +27,8 @@ TREE_ACTIONS = {
             "When executing, include all needed context in the <task>",
             "Frame the task to be self-contained - the subagent cannot see prior conversation",
             "Include relevant context (e.g., candidate names, criteria) in the task itself",
-        ]
+        ],
+        "with_param": True,
     },
     "revise": {
         "description": "Revise tasks - update the remaining task list based on new findings",
@@ -40,7 +41,8 @@ TREE_ACTIONS = {
             "Build on previous findings - if candidates were found, verify them against remaining criteria",
             "If a subtask failed, try a different approach (e.g., search for specific candidate + criterion)",
             "Avoid repetition - don't repeat failed searches with identical queries",
-        ]
+        ],
+        "with_param": True,
     },
     "exam": {
         "description": "Exam - verify a previous step's result if it seems suspicious or critical",
@@ -50,7 +52,8 @@ TREE_ACTIONS = {
             "Subagent results may be wrong - do not blindly trust them",
             "If a result seems suspicious or inconsistent, use exam to verify before proceeding",
             "Verify critical steps that affect the final answer",
-        ]
+        ],
+        "with_param": True,
     },
     "rewind": {
         "description": "Rewind - if the current path repeatedly fails and you need to backtrack to restart",
@@ -60,7 +63,8 @@ TREE_ACTIONS = {
             "Use when you need to backtrack to a very early step to restart",
             "Try different approaches after rewinding",
             "Use rewind only if you must restart from an early step due to a major workflow error",
-        ]
+        ],
+        "with_param": False,
     },
     "answer": {
         "description": "Answer - final response when you have enough verified information",
@@ -70,12 +74,19 @@ TREE_ACTIONS = {
             "Provide the final answer when you have enough verified information",
             "Ensure justification is concise (1-2 sentences)",
             "Answer should be the final answer span only",
-        ]
+        ],
+        "with_param": True,
     },
 }
 
 
-def build_decision_prompt(actions: list[str], question_var: str = "{question}", tasks_var: str = "{tasks}", include_tasks: bool = True) -> str:
+def build_decision_prompt(
+    actions: list[str],
+    question_var: str = "{question}",
+    tasks_var: str = "{tasks}",
+    include_tasks: bool = True,
+    single_action: bool = False,
+) -> str:
     """Build a decision prompt from selected actions.
 
     Args:
@@ -83,28 +94,45 @@ def build_decision_prompt(actions: list[str], question_var: str = "{question}", 
         question_var: Variable name for question (default: "{question}")
         tasks_var: Variable name for tasks (default: "{tasks}")
         include_tasks: Whether to include the "Remaining tasks:" section (default: True)
+        single_action: If True, simplify prompt for single action (no "Choose ONE action").
+            Raises AssertionError if len(actions) > 1.
 
     Returns:
         Formatted decision prompt string
     """
-    prompt_lines = [
-        "Decide the next action based on current progress.",
-        "",
-        f"Question: {question_var}",
-        "",
-    ]
+    if single_action:
+        assert len(actions) == 1, f"single_action=True requires exactly 1 action, got {len(actions)}"
 
-    if include_tasks:
+    prompt_lines = []
+
+    if not single_action:
         prompt_lines.extend([
-            f"Remaining tasks:",
-            tasks_var,
+            "Decide the next action based on current progress.",
             "",
         ])
 
     prompt_lines.extend([
-        "Choose ONE action and output only its block:",
-        ""
+        f"Question: {question_var}",
+        "",
     ])
+
+    if include_tasks:
+        prompt_lines.extend([
+            "Remaining tasks:",
+            tasks_var,
+            "",
+        ])
+
+    if single_action:
+        prompt_lines.extend([
+            "Provide the details in this format:",
+            ""
+        ])
+    else:
+        prompt_lines.extend([
+            "Choose ONE action and output only its block:",
+            ""
+        ])
 
     # Add action options
     for i, action_name in enumerate(actions, 1):
@@ -112,8 +140,12 @@ def build_decision_prompt(actions: list[str], question_var: str = "{question}", 
             raise ValueError(f"Unknown action: {action_name}")
 
         action = TREE_ACTIONS[action_name]
-        prompt_lines.append(f"{i}. {action['description']}:")
-        prompt_lines.append(action["format"])
+        if single_action:
+            # No numbered prefix or description for single action
+            prompt_lines.append(action["format"])
+        else:
+            prompt_lines.append(f"{i}. {action['description']}:")
+            prompt_lines.append(action["format"])
         prompt_lines.append("")
 
     # Collect all guidelines

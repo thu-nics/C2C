@@ -12,7 +12,7 @@ from camel.types import ModelPlatformType, ModelType
 from camel.configs import ChatGPTConfig
 
 from rosetta.workflow.tree_prompt import (
-    INIT_PROMPT, REWIND_PROMPT, EXAM_PROMPT, SELECT_PROMPT, build_decision_prompt
+    INIT_PROMPT, REWIND_PROMPT, EXAM_PROMPT, SELECT_PROMPT, build_decision_prompt, TREE_ACTIONS
 )
 from rosetta.workflow.prompt import SEARCH_AGENT_PROMPT as WORKER_PROMPT
 from rosetta.workflow.track import InteractionTracker, record_interaction
@@ -167,23 +167,30 @@ class FlowFormater:
         return cls.build_action_prompt(available_actions, question, tasks)
 
     @classmethod
-    def build_action_prompt(cls, actions: List[str], question: str, tasks: List[str]) -> str:
+    def build_action_prompt(
+        cls,
+        actions: List[str],
+        question: str,
+        tasks: List[str],
+        single_action: bool = False,
+    ) -> str:
         """Build prompt with an explicit set of actions.
 
         Args:
             actions: List of action names to include in the prompt.
             question: Research question.
             tasks: Current task list.
+            single_action: If True, simplify prompt for single action.
 
         Returns:
             Formatted decision prompt.
         """
         if tasks:
             tasks_str = "\n".join(f"- {t}" for t in tasks)
-            prompt_template = build_decision_prompt(actions, include_tasks=True)
+            prompt_template = build_decision_prompt(actions, include_tasks=True, single_action=single_action)
             return prompt_template.format(question=question, tasks=tasks_str)
         else:
-            prompt_template = build_decision_prompt(actions, include_tasks=False)
+            prompt_template = build_decision_prompt(actions, include_tasks=False, single_action=single_action)
             return prompt_template.format(question=question)
 
 
@@ -201,6 +208,26 @@ def state_rule(_current_state: str) -> List[str]:
         List of available action names for next transition.
     """
     return ["execute", "revise", "rewind", "answer"]
+
+
+def update_main_history(
+    main_agent: ChatAgent,
+    action: str,
+    result: StateResult,
+) -> None:
+    """Update main agent history by dropping decision messages and adding simplified records.
+
+    Args:
+        main_agent: Agent whose memory to modify.
+        action: The chosen action (for potential action-specific logic).
+        result: StateResult containing records to add.
+    """
+    # Pop the full decision prompt + response (2 messages)
+    main_agent.memory.pop_records(2)
+
+    # Add simplified records from StateResult
+    if result.records:
+        main_agent.memory.write_records(messages_to_memoryRecords(result.records))
 
 
 def _rollback_history(main_agent: ChatAgent, rewind_idx: int, summary: str):
@@ -393,7 +420,7 @@ def do_revise(
     Returns:
         StateResult with conversation records and new tasks.
     """
-    revise_prompt = FlowFormater.build_action_prompt(["revise"], question, tasks)
+    revise_prompt = FlowFormater.build_action_prompt(["revise"], question, tasks, single_action=False)
     return StateResult(
         feedback=state_conversation[1]["content"],
         records=[
@@ -518,8 +545,6 @@ def main_decision(
     prompt = FlowFormater.build_decision_prompt(state, tasks, question)
     response = main_agent.step(prompt)
     record_interaction(tracker, main_agent.chat_history, llm_id=0)
-    # Remove the prompt+response from history (keep only subtask/feedback pairs)
-    main_agent.memory.pop_records(2)
 
     next_state, data = FlowParser.parse_decision(response.msg.content)
     conversation = [
@@ -527,6 +552,46 @@ def main_decision(
         {"role": "assistant", "content": response.msg.content},
     ]
     return next_state, data, conversation
+
+
+def focused_substep(
+    main_agent: ChatAgent,
+    action: str,
+    question: str,
+    tasks: List[str],
+    tracker: InteractionTracker = None,
+) -> Tuple[dict, List[Dict[str, str]]]:
+    """Get focused parameters for an action by re-stepping with single-action prompt.
+
+    When an action requires parameters (with_param=True), this function pops the
+    original decision prompt/response and re-steps with a focused single-action prompt
+    to get the specific parameters.
+
+    Args:
+        main_agent: Main agent for decision making.
+        action: The chosen action name.
+        question: Research question.
+        tasks: Current task list.
+        tracker: Interaction tracker.
+
+    Returns:
+        Tuple of (parsed_data, conversation).
+    """
+    # Pop the original decision prompt + response
+    main_agent.memory.pop_records(2)
+
+    # Build focused prompt with only the selected action
+    prompt = FlowFormater.build_action_prompt([action], question, tasks, single_action=True)
+    response = main_agent.step(prompt)
+    record_interaction(tracker, main_agent.chat_history, llm_id=0)
+
+    # Parse the focused response
+    _, data = FlowParser.parse_decision(response.msg.content)
+    conversation = [
+        {"role": "user", "content": prompt},
+        {"role": "assistant", "content": response.msg.content},
+    ]
+    return data, conversation
 
 
 def _post_process_rewind(
@@ -576,6 +641,7 @@ def do_tree_research(
     worker_tools: List[FunctionTool] = None,
     max_rounds: int = 10,
     show_status: bool = True,
+    focused: bool = False,
 ) -> Tuple[str, Optional[InteractionTracker]]:
     """Tree-based research with execute/revise/rewind/exam/answer states.
 
@@ -598,6 +664,8 @@ def do_tree_research(
         worker_tools: List of tools for worker. Defaults to [Google search].
         max_rounds: Maximum iterations.
         show_status: Show spinner status.
+        focused: If True, use focused_substep for actions with with_param=True.
+            This re-prompts with a single-action prompt to get cleaner parameters.
 
     Returns:
         Answer string and tracker.
@@ -629,13 +697,19 @@ def do_tree_research(
             state, main_agent, tasks, question, tracker
         )
 
+        # If focused mode and action requires parameters, re-prompt with single-action prompt
+        if focused and next_state in TREE_ACTIONS and TREE_ACTIONS[next_state].get("with_param", False):
+            data, conversation = focused_substep(
+                main_agent, next_state, question, tasks, tracker
+            )
+
         if tree_tracker is not None:
             parent_id = tree_tracker.get_current_parent()
             tree_tracker.add_node(node_id, parent_id, next_state, data)
             node_id += 1
 
         if next_state == "answer":
-            return data["answer"], tracker
+            return data.get("answer", ""), tracker
 
         # Build status description
         status_map = {
@@ -663,11 +737,11 @@ def do_tree_research(
                 result = do_revise(conversation, data, question, tasks)
 
             elif next_state == "rewind":
-                result = do_rewind(rewind_model, main_agent.chat_history)
+                result = do_rewind(rewind_model, main_agent.chat_history[:-2])
 
             elif next_state == "exam":
                 result = do_exam(
-                    exam_model, main_agent.chat_history, data.get("step", 0), question, tracker
+                    exam_model, main_agent.chat_history[:-2], data.get("step", 0), question, tracker
                 )
 
             else:
@@ -681,27 +755,26 @@ def do_tree_research(
             if tree_tracker is not None:
                 tree_tracker.record_tools_used(tools_used or [])
 
+            # Update main agent history (pop decision + add simplified records)
+            update_main_history(main_agent, next_state, result)
+
             # Post-process kwargs (special handling)
             if "rewind_to" in result.kwargs:
                 end_idx, tasks = _post_process_rewind(
                     main_agent, result, tasks_at_step, tree_tracker
                 )
-            else:
-                # Standard processing: write records, update tasks
-                if result.records:
-                    main_agent.memory.write_records(messages_to_memoryRecords(result.records))
-                if result.tasks is not None:
-                    tasks = result.tasks
+            elif result.tasks is not None:
+                tasks = result.tasks
 
         state = next_state
 
     # Fallback: force answer
     if tasks:
         tasks_str = "\n".join(f"- {t}" for t in tasks)
-        prompt_template = build_decision_prompt(["answer"], include_tasks=True)
+        prompt_template = build_decision_prompt(["answer"], include_tasks=True, single_action=False)
         prompt = prompt_template.format(question=question, tasks=tasks_str)
     else:
-        prompt_template = build_decision_prompt(["answer"], include_tasks=False)
+        prompt_template = build_decision_prompt(["answer"], include_tasks=False, single_action=False)
         prompt = prompt_template.format(question=question)
     response = main_agent.step(prompt)
     record_interaction(tracker, main_agent.chat_history, llm_id=0)
