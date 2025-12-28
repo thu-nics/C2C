@@ -11,12 +11,10 @@ import csv
 import json
 import multiprocessing as mp
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Optional, Callable
 
-import requests
 from datasets import load_dataset
 from transformers import AutoTokenizer
 from rich.progress import Progress, BarColumn, TextColumn, TimeElapsedColumn
@@ -25,13 +23,18 @@ from rich.table import Table
 from dotenv import find_dotenv, load_dotenv
 
 from camel.agents import ChatAgent
-from camel.toolkits import FunctionTool, SearchToolkit
+from camel.toolkits import FunctionTool
 
 from rosetta.workflow.retriever import search_engine
 from rosetta.workflow.selector import ContextSelector
 from rosetta.workflow.track import InteractionTracker, TreeTracker
-from rosetta.workflow.evaluation import extract_answer, exact_match, load_done_ids, run_research
-from rosetta.workflow.prompt import ERROR_CATEGORIES, ERROR_CATEGORIZATION_PROMPT, LLM_JUDGE_PROMPT
+from rosetta.workflow.evaluation import (
+    extract_answer,
+    exact_match,
+    load_done_ids,
+    run_research,
+    LLMJudge,
+)
 from rosetta.workflow.camel_utils import create_model
 
 
@@ -69,8 +72,9 @@ class EvalConfig:
     search_to_main: str
     main: str
     num_workers: int
-    eval_api_url: Optional[str] = None  # API URL for LLM judge, defaults to model_url
-    eval_model_type: Optional[str] = None  # Model type for LLM judge, defaults to model_type
+    judge_model_provider: str = "gemini"  # Model provider for LLM judge (default: gemini)
+    judge_api_url: Optional[str] = None  # API URL for LLM judge (for local provider)
+    judge_model_type: Optional[str] = None  # Model type for LLM judge
     step_timeout: Optional[float] = None  # Timeout in seconds for agent step calls
     enable_thinking: bool = False  # Enable thinking mode for main agent (local models only)
 
@@ -297,125 +301,47 @@ def aggregate_results(process_dir: Path, output_path: Path, output_format: str) 
     return total, correct
 
 
-def _evaluate_single_answer(rec: dict, api_url: str, model_type: str, prompt_template: str) -> tuple[dict, bool]:
-    """Evaluate a single answer via SGLang API."""
-    prompt = prompt_template.format(
-        question=rec["question"],
-        gold_answer=rec["gold_answer"],
-        pred_answer=rec["pred_answer"],
-    )
-
-    request_data = {
-        "model": model_type,
-        "messages": [
-            {"role": "system", "content": "You are an expert evaluator."},
-            {"role": "user", "content": prompt}
-        ],
-        "temperature": 0.0,
-        "max_tokens": 512,
-    }
-
-    try:
-        response = requests.post(api_url, json=request_data, timeout=180)
-        response.raise_for_status()
-        result = response.json()
-        content = result["choices"][0]["message"]["content"]
-        judgment = content.strip().upper()
-        is_correct = "CORRECT" in judgment and "INCORRECT" not in judgment
-        rec["correct_llm"] = is_correct
-        return rec, is_correct
-    except Exception:
-        rec["correct_llm"] = False
-        return rec, False
-
-
-def _categorize_single_error(rec: dict, api_url: str, model_type: str) -> tuple[dict, str]:
-    """Categorize error for a single incorrect answer via SGLang API."""
-    # Format chat history for analysis
-    chat_history = ""
-    if rec.get("llm0_messages"):
-        for i, msg in enumerate(rec["llm0_messages"], 1):
-            role = msg["role"].upper()
-            content = msg["content"]
-            # Truncate very long messages
-            if len(content) > 1000:
-                content = content[:1000] + "... [truncated]"
-            chat_history += f"[{i}] {role}:\n{content}\n\n"
-
-    # Build category list from ERROR_CATEGORIES
-    category_list = "\n".join([
-        f"{i}. **{cat}** - {desc}"
-        for i, (cat, desc) in enumerate(ERROR_CATEGORIES.items(), 1)
-    ])
-
-    prompt = ERROR_CATEGORIZATION_PROMPT.format(
-        question=rec["question"],
-        gold_answer=rec["gold_answer"],
-        pred_answer=rec["pred_answer"],
-        chat_history=chat_history if chat_history else "No chat history available",
-        category_list=category_list,
-    )
-
-    request_data = {
-        "model": model_type,
-        "messages": [
-            {"role": "system", "content": "You are an expert evaluator analyzing LLM research workflow failures."},
-            {"role": "user", "content": prompt}
-        ],
-        "temperature": 0.0,
-        "max_tokens": 1024,
-    }
-
-    try:
-        response = requests.post(api_url, json=request_data, timeout=180)
-        response.raise_for_status()
-        result = response.json()
-        content = result["choices"][0]["message"]["content"].strip()
-
-        # Extract category from response
-        category = "Unknown"
-        for cat in ERROR_CATEGORIES.keys():
-            if cat.lower() in content.lower():
-                category = cat
-                break
-
-        rec["error_category"] = category
-        return rec, category
-    except Exception:
-        rec["error_category"] = "Unknown"
-        return rec, "Unknown"
-
-
-def llm_categorize_errors(jsonl_path: Path, config: EvalConfig, max_workers: int = 32) -> dict[str, list]:
-    """Use LLM to categorize error reasons for incorrect answers based on full chat history."""
-    # Read all records
+def read_jsonl(path: Path) -> list[dict]:
+    """Read records from a JSONL file."""
     records = []
-    with jsonl_path.open("r", encoding="utf-8") as f:
+    with path.open("r", encoding="utf-8") as f:
         for line in f:
-            line = line.strip()
-            if line:
+            if line.strip():
                 try:
                     records.append(json.loads(line))
                 except json.JSONDecodeError:
                     continue
+    return records
 
-    # Prepare records for categorization (only incorrect ones)
-    incorrect_records = [rec for rec in records if not rec.get("correct_llm", False) and rec.get("error") is None]
 
-    # Initialize categories for records with errors
-    for rec in records:
-        if rec.get("error") is not None:
-            rec["error_category"] = "System Error"
-        elif rec.get("correct_llm", False):
-            rec["error_category"] = "N/A"
+def write_jsonl(path: Path, records: list[dict]) -> None:
+    """Write records to a JSONL file."""
+    with path.open("w", encoding="utf-8") as f:
+        for rec in records:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
-    # Use eval-specific API URL and model type, or fallback to main config
-    eval_base_url = config.eval_api_url or config.model_url
-    eval_model = config.eval_model_type or config.model_type
-    api_url = f"{eval_base_url.rstrip('/')}/chat/completions"
-    category_counts = {}
 
-    # Concurrent categorization with progress bar
+def run_llm_judge(
+    jsonl_path: Path,
+    config: EvalConfig,
+    max_workers: int = 32,
+) -> tuple[int, int, dict[str, list]]:
+    """Run LLM judge for answer correctness and error categorization.
+
+    Returns:
+        Tuple of (total_judged, correct_count, category_counts).
+    """
+    records = read_jsonl(jsonl_path)
+
+    # Create judge model (defaults to Gemini)
+    judge_model = create_model(
+        provider=config.judge_model_provider,
+        model_type=config.judge_model_type,
+        model_url=config.judge_api_url,
+    )
+    judge = LLMJudge(judge_model, max_workers=max_workers)
+
+    # Run judge with progress
     with Progress(
         TextColumn("[progress.description]{task.description}"),
         BarColumn(),
@@ -423,92 +349,22 @@ def llm_categorize_errors(jsonl_path: Path, config: EvalConfig, max_workers: int
         TextColumn("({task.completed}/{task.total})"),
         TimeElapsedColumn(),
     ) as progress:
-        task = progress.add_task("Categorizing errors", total=len(incorrect_records))
+        # Judge answers
+        task = progress.add_task("Judging answers", total=1)
+        records, total_llm, correct_llm = judge.judge_batch(
+            records,
+            progress_callback=lambda c, t: progress.update(task, completed=c, total=t),
+        )
 
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {
-                executor.submit(_categorize_single_error, rec, api_url, eval_model): rec
-                for rec in incorrect_records
-            }
+        # Categorize errors
+        task = progress.add_task("Categorizing errors", total=1)
+        records, category_counts = judge.categorize_batch(
+            records,
+            progress_callback=lambda c, t: progress.update(task, completed=c, total=t),
+        )
 
-            for future in as_completed(futures):
-                try:
-                    rec, category = future.result()
-                    if category not in category_counts:
-                        category_counts[category] = []
-                    category_counts[category].append(rec)
-                    progress.update(task, advance=1)
-                except Exception as e:
-                    progress.update(task, advance=1)
-                    print(f"Categorization error: {e}")
-
-    # Write updated records
-    with jsonl_path.open("w", encoding="utf-8") as f:
-        for rec in records:
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-
-    return category_counts
-
-
-def llm_evaluate_answers(jsonl_path: Path, config: EvalConfig, max_workers: int = 32) -> tuple[int, int]:
-    """Use LLM to evaluate answer correctness with concurrent requests to SGLang backend."""
-    eval_prompt_template = LLM_JUDGE_PROMPT
-
-    # Read all records
-    records = []
-    with jsonl_path.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                try:
-                    records.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
-
-    # Prepare records for evaluation
-    eval_records = [rec for rec in records if rec.get("error") is None]
-    for rec in records:
-        if rec.get("error") is not None:
-            rec["correct_llm"] = False
-
-    total_llm = len(eval_records)
-    correct_llm = 0
-    # Use eval-specific API URL and model type, or fallback to main config
-    eval_base_url = config.eval_api_url or config.model_url
-    eval_model = config.eval_model_type or config.model_type
-    api_url = f"{eval_base_url.rstrip('/')}/chat/completions"
-
-    # Concurrent evaluation with progress bar
-    with Progress(
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-        TextColumn("({task.completed}/{task.total})"),
-        TimeElapsedColumn(),
-    ) as progress:
-        task = progress.add_task("Evaluating answers", total=total_llm)
-
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {
-                executor.submit(_evaluate_single_answer, rec, api_url, eval_model, eval_prompt_template): rec
-                for rec in eval_records
-            }
-
-            for future in as_completed(futures):
-                try:
-                    rec, is_correct = future.result()
-                    correct_llm += int(is_correct)
-                    progress.update(task, advance=1)
-                except Exception as e:
-                    progress.update(task, advance=1)
-                    print(f"Evaluation error: {e}")
-
-    # Write updated records
-    with jsonl_path.open("w", encoding="utf-8") as f:
-        for rec in records:
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-
-    return total_llm, correct_llm
+    write_jsonl(jsonl_path, records)
+    return total_llm, correct_llm, category_counts
 
 
 def write_output_files(jsonl_path: Path, output_path: Path, output_format: str) -> None:
@@ -520,7 +376,8 @@ def write_output_files(jsonl_path: Path, output_path: Path, output_format: str) 
     # Write CSV
     csv_path = output_path.with_suffix(".csv")
     csv_fields = ["idx", "hotpot_id", "question", "gold_answer", "pred_answer", "pred_raw",
-                  "correct_em", "correct_llm", "error_category", "tools_used", "seconds", "error"]
+                  "correct_em", "correct_llm", "judge_confidence", "judge_reason",
+                  "error_category", "tools_used", "seconds", "error"]
 
     with jsonl_path.open("r", encoding="utf-8") as fin, csv_path.open("w", encoding="utf-8", newline="") as fout:
         writer = csv.DictWriter(fout, fieldnames=csv_fields)
@@ -582,8 +439,10 @@ def main() -> None:
     parser.add_argument("--search_to_main", type=str, default="qr", choices=["all", "qr"])
     parser.add_argument("--main", type=str, default="all", choices=["all", "none", "qr"])
     parser.add_argument("--num-workers", type=int, default=4, help="Number of parallel workers")
-    parser.add_argument("--eval-api-url", type=str, default="http://localhost:30000/v1", help="API URL for LLM judge")
-    parser.add_argument("--eval-model-type", type=str, default="default", help="Model type for LLM judge")
+    parser.add_argument("--judge-model-provider", type=str, default="gemini", choices=["local", "openai", "gemini"],
+                        help="Model provider for LLM judge (default: gemini)")
+    parser.add_argument("--judge-api-url", type=str, default=None, help="API URL for LLM judge (for local provider)")
+    parser.add_argument("--judge-model-type", type=str, default=None, help="Model type for LLM judge")
     parser.add_argument("--step-timeout", type=float, default=None, help="Timeout in seconds for agent step calls")
     parser.add_argument("--enable-thinking", action="store_true", help="Enable thinking mode for main agent (local models only)")
     args = parser.parse_args()
@@ -606,8 +465,9 @@ def main() -> None:
         search_to_main=args.search_to_main,
         main=args.main,
         num_workers=args.num_workers,
-        eval_api_url=args.eval_api_url,
-        eval_model_type=args.eval_model_type,
+        judge_model_provider=args.judge_model_provider,
+        judge_api_url=args.judge_api_url,
+        judge_model_type=args.judge_model_type,
         step_timeout=args.step_timeout,
         enable_thinking=args.enable_thinking,
     )
@@ -702,13 +562,9 @@ def main() -> None:
     else:
         final_jsonl = config.output.with_suffix(".jsonl")
 
-    # LLM-based evaluation
-    print("\nRunning LLM-based evaluation...")
-    total_llm, correct_llm = llm_evaluate_answers(final_jsonl, config)
-
-    # Error categorization
-    print("\nCategorizing errors...")
-    category_counts = llm_categorize_errors(final_jsonl, config)
+    # LLM judge for answer correctness and error categorization
+    print("\nRunning LLM judge...")
+    total_llm, correct_llm, category_counts = run_llm_judge(final_jsonl, config)
 
     # Write final output files with updated records
     write_output_files(final_jsonl, config.output, config.output_format)

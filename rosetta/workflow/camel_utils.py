@@ -68,7 +68,7 @@ def create_model(
             api_key=api_key,
         )
     elif provider == "gemini":
-        model_type = model_type or "gemini-3-flash-preview"
+        model_type = model_type or "gemini-3-pro-preview"
         config = ChatGPTConfig(
             max_tokens=max_tokens,
             temperature=temperature,

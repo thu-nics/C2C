@@ -135,28 +135,35 @@ Categorize the PRIMARY reason for failure into ONE category:
 
 Respond with ONLY the category name."""
 
-LLM_JUDGE_PROMPT = """You are comparing a predicted answer to a gold (reference) answer. Your task is to determine if they convey the SAME meaning.
+LLM_JUDGE_SYSTEM = """You are a helpful assistant acting as an impartial judge.
+Your job is to evaluate whether a candidate answer is correct for a given question,
+by comparing it to the reference answer(s). Be strict about factual correctness."""
 
-IMPORTANT: Do NOT use your own knowledge to verify factual correctness. Only compare whether the two answers match each other semantically.
+LLM_JUDGE_PROMPT = """You will be given:
+- Question
+- Reference Answer(s): one or more acceptable answers
+- Candidate Answer: the model's answer
 
-Question (for context only): {question}
+Decide if the Candidate Answer should be marked correct.
 
-Gold Answer: {gold_answer}
+Judging rules:
+1) Treat as CORRECT if the candidate is semantically equivalent to any reference answer.
+   - Accept aliases, paraphrases, different formatting, and minor wording differences.
+   - For entity answers, accept common alternative names (e.g., "NYC" vs "New York City").
+2) Treat as INCORRECT if the candidate:
+   - names a different entity, date, number, or location than the reference;
+   - contradicts the reference;
+   - is too vague to uniquely match the reference (unless the reference is also vague);
+   - claims it cannot be answered / "I don't know" when a reference exists.
+3) If the candidate includes extra information:
+   - Ignore extra details IF they are consistent with the reference.
+   - Mark INCORRECT if any extra detail is clearly false or contradicts the reference.
+4) If the answer type is YES/NO, the polarity must match exactly.
+5) If multiple reference answers are provided, matching ANY one is sufficient.
 
-Predicted Answer: {pred_answer}
+Return JSON only:
+{{"verdict": true|false, "confidence": "low"|"medium"|"high", "brief_reason": "1-2 sentences"}}
 
-Judge if the Predicted Answer matches the Gold Answer by checking:
-- Do they refer to the same entity, person, place, or concept?
-- Are they numerically equivalent (e.g., "1,000" vs "1000", "50%" vs "half")?
-- Are they paraphrases expressing the same meaning?
-- For yes/no answers: "yes" only matches "yes", and "no" only matches "no" - opposites are INCORRECT
-
-Ignore differences in:
-- Capitalization, punctuation, or minor formatting
-- Extra context or explanation (if core answer matches)
-- Phrasing variations that preserve meaning
-
-Reply 'CORRECT' if the Predicted Answer conveys the same meaning as the Gold Answer.
-Reply 'INCORRECT' if they refer to different things, give conflicting information, or are opposites.
-
-Your response must be ONLY 'CORRECT' or 'INCORRECT'."""
+Question: {question}
+Reference Answer(s): {gold_answer}
+Candidate Answer: {pred_answer}"""

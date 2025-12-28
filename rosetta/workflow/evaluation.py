@@ -1,17 +1,27 @@
 """
 Evaluation utilities for workflow research tasks.
 
-Provides functions for answer extraction, normalization, and exact match evaluation.
+Provides functions for answer extraction, normalization, exact match evaluation,
+and LLM-based answer evaluation with error categorization.
 """
 
 from __future__ import annotations
 
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import List, Optional, TYPE_CHECKING, Tuple
+from typing import Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
+
+from camel.messages import BaseMessage
 
 from rosetta.workflow.singleflow import single_research
+from rosetta.workflow.prompt import (
+    ERROR_CATEGORIES,
+    ERROR_CATEGORIZATION_PROMPT,
+    LLM_JUDGE_SYSTEM,
+    LLM_JUDGE_PROMPT,
+)
 
 if TYPE_CHECKING:
     from camel.agents import ChatAgent
@@ -172,3 +182,181 @@ def run_research(
             show_status=show_status,
         )
     raise ValueError(f"Unsupported mode: {mode}")
+
+
+class LLMJudge:
+    """LLM-based judge for answer correctness and error categorization.
+
+    Args:
+        model: CAMEL model backend (created via create_model).
+        max_workers: Maximum number of parallel workers for batch operations.
+    """
+
+    def __init__(self, model: "BaseModelBackend", max_workers: int = 32):
+        self._model = model
+        self._max_workers = max_workers
+
+    def _run(self, system: str, user: str) -> str:
+        """Run model and return response content."""
+        messages = [
+            BaseMessage.make_system_message(role_name="system", content=system).to_openai_message(),
+            BaseMessage.make_user_message(role_name="user", content=user).to_openai_message(),
+        ]
+        response = self._model.run(messages)
+        return response.msgs[0].content if response.msgs else ""
+
+    def judge_answer(self, rec: dict) -> Tuple[dict, bool]:
+        """Judge if predicted answer matches gold answer.
+
+        Args:
+            rec: Record with question, gold_answer, pred_answer fields.
+
+        Returns:
+            Tuple of (updated record with correct_llm field, is_correct).
+        """
+        prompt = LLM_JUDGE_PROMPT.format(
+            question=rec["question"],
+            gold_answer=rec["gold_answer"],
+            pred_answer=rec["pred_answer"],
+        )
+        try:
+            content = self._run(LLM_JUDGE_SYSTEM, prompt)
+            # Parse JSON response
+            text = content.strip()
+            # Extract JSON from response (handle markdown code blocks)
+            if "```" in text:
+                text = text.split("```")[1]
+                if text.startswith("json"):
+                    text = text[4:]
+                text = text.strip()
+            result = json.loads(text)
+            is_correct = result.get("verdict", False)
+            rec["correct_llm"] = is_correct
+            rec["judge_confidence"] = result.get("confidence", "unknown")
+            rec["judge_reason"] = result.get("brief_reason", "")
+            return rec, is_correct
+        except Exception:
+            rec["correct_llm"] = False
+            return rec, False
+
+    def categorize_error(self, rec: dict) -> Tuple[dict, str]:
+        """Categorize the error reason for an incorrect answer.
+
+        Args:
+            rec: Record with question, gold_answer, pred_answer, llm0_messages fields.
+
+        Returns:
+            Tuple of (updated record with error_category field, category string).
+        """
+        # Format chat history
+        chat_history = ""
+        if rec.get("llm0_messages"):
+            for i, msg in enumerate(rec["llm0_messages"], 1):
+                role = msg["role"].upper()
+                content = msg["content"]
+                if len(content) > 1000:
+                    content = content[:1000] + "... [truncated]"
+                chat_history += f"[{i}] {role}:\n{content}\n\n"
+
+        category_list = "\n".join([
+            f"{i}. **{cat}** - {desc}"
+            for i, (cat, desc) in enumerate(ERROR_CATEGORIES.items(), 1)
+        ])
+
+        prompt = ERROR_CATEGORIZATION_PROMPT.format(
+            question=rec["question"],
+            gold_answer=rec["gold_answer"],
+            pred_answer=rec["pred_answer"],
+            chat_history=chat_history or "No chat history available",
+            category_list=category_list,
+        )
+
+        try:
+            content = self._run(
+                "You are an expert judge analyzing LLM research workflow failures.",
+                prompt,
+            )
+            category = "Unknown"
+            for cat in ERROR_CATEGORIES.keys():
+                if cat.lower() in content.lower():
+                    category = cat
+                    break
+            rec["error_category"] = category
+            return rec, category
+        except Exception:
+            rec["error_category"] = "Unknown"
+            return rec, "Unknown"
+
+    def judge_batch(
+        self,
+        records: List[dict],
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+    ) -> Tuple[List[dict], int, int]:
+        """Judge answer correctness for a batch of records in parallel.
+
+        Args:
+            records: List of record dicts to judge.
+            progress_callback: Optional callback(completed, total) for progress.
+
+        Returns:
+            Tuple of (updated records, total judged, correct count).
+        """
+        to_judge = [rec for rec in records if rec.get("error") is None]
+        for rec in records:
+            if rec.get("error") is not None:
+                rec["correct_llm"] = False
+
+        total, correct, completed = len(to_judge), 0, 0
+
+        with ThreadPoolExecutor(max_workers=self._max_workers) as executor:
+            futures = {executor.submit(self.judge_answer, rec): rec for rec in to_judge}
+            for future in as_completed(futures):
+                try:
+                    _, is_correct = future.result()
+                    correct += int(is_correct)
+                except Exception:
+                    pass
+                completed += 1
+                if progress_callback:
+                    progress_callback(completed, total)
+
+        return records, total, correct
+
+    def categorize_batch(
+        self,
+        records: List[dict],
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+    ) -> Tuple[List[dict], Dict[str, List[dict]]]:
+        """Categorize errors for a batch of incorrect records in parallel.
+
+        Args:
+            records: List of records (should have correct_llm field set).
+            progress_callback: Optional callback(completed, total) for progress.
+
+        Returns:
+            Tuple of (updated records, category_counts dict).
+        """
+        # Initialize categories
+        for rec in records:
+            if rec.get("error") is not None:
+                rec["error_category"] = "System Error"
+            elif rec.get("correct_llm", False):
+                rec["error_category"] = "N/A"
+
+        incorrect = [rec for rec in records if not rec.get("correct_llm", False) and rec.get("error") is None]
+        category_counts: Dict[str, List[dict]] = {}
+        total, completed = len(incorrect), 0
+
+        with ThreadPoolExecutor(max_workers=self._max_workers) as executor:
+            futures = {executor.submit(self.categorize_error, rec): rec for rec in incorrect}
+            for future in as_completed(futures):
+                try:
+                    rec, category = future.result()
+                    category_counts.setdefault(category, []).append(rec)
+                except Exception:
+                    pass
+                completed += 1
+                if progress_callback:
+                    progress_callback(completed, total)
+
+        return records, category_counts
