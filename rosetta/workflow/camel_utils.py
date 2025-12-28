@@ -1,10 +1,91 @@
 """Utility functions for CAMEL message conversion."""
 
-from typing import List
+import os
+from typing import List, Optional, Any
 
 from camel.messages import BaseMessage
 from camel.memories import MemoryRecord, ContextRecord
-from camel.types import OpenAIBackendRole, RoleType
+from camel.types import OpenAIBackendRole, RoleType, ModelPlatformType, ModelType
+from camel.models import ModelFactory
+from camel.configs import ChatGPTConfig
+
+
+def create_model(
+    provider: str,
+    model_type: Optional[str] = None,
+    model_url: Optional[str] = None,
+    api_key: Optional[str] = None,
+    temperature: float = 0.0,
+    max_tokens: int = 32768,
+    chat_template_kwargs: Optional[dict] = None,
+    **kwargs: Any,
+):
+    """Create a model based on the provider.
+
+    Args:
+        provider: Model provider, one of "local", "openai", "gemini".
+        model_type: Model type/name string. If None, uses provider defaults:
+            - local: "local"
+            - openai: GPT_4O_MINI
+            - gemini: "gemini-3-flash-preview"
+        model_url: API URL for local/compatible models.
+        api_key: API key (uses env var if not provided).
+        temperature: Sampling temperature.
+        max_tokens: Maximum tokens to generate.
+        chat_template_kwargs: Custom chat template kwargs for local models.
+            Defaults to {"enable_thinking": False} if not provided.
+        **kwargs: Additional model config parameters.
+
+    Returns:
+        Configured CAMEL model instance.
+
+    Raises:
+        ValueError: If provider is not supported.
+    """
+    if provider == "local":
+        model_type = model_type or "local"
+        # Use provided chat_template_kwargs or default
+        effective_chat_template_kwargs = chat_template_kwargs if chat_template_kwargs is not None else {"enable_thinking": False}
+        return ModelFactory.create(
+            model_platform=ModelPlatformType.OPENAI_COMPATIBLE_MODEL,
+            model_type=model_type,
+            model_config_dict={
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "extra_body": {"chat_template_kwargs": effective_chat_template_kwargs},
+                **kwargs,
+            },
+            api_key=api_key or "not-needed",
+            url=model_url or "http://localhost:30000/v1",
+        )
+    elif provider == "openai":
+        model_type = model_type or ModelType.GPT_5_MINI
+        config = ChatGPTConfig(max_tokens=max_tokens, temperature=temperature)
+        return ModelFactory.create(
+            model_platform=ModelPlatformType.OPENAI,
+            model_type=model_type,
+            model_config_dict=config.as_dict(),
+            api_key=api_key,
+        )
+    elif provider == "gemini":
+        model_type = model_type or "gemini-3-flash-preview"
+        config = ChatGPTConfig(
+            max_tokens=max_tokens,
+            temperature=temperature,
+            reasoning_effort=kwargs.get("reasoning_effort", "medium"),
+        )
+        return ModelFactory.create(
+            model_platform=ModelPlatformType.OPENAI_COMPATIBLE_MODEL,
+            model_type=model_type,
+            model_config_dict=config.as_dict(),
+            api_key=api_key or os.getenv("GEMINI_API_KEY"),
+            url="https://generativelanguage.googleapis.com/v1beta/openai/",
+        )
+    else:
+        raise ValueError(
+            f"Unsupported model provider: {provider}. "
+            f"Choose from: local, openai, gemini"
+        )
 
 def context_records_to_memory_records(
     records: List[ContextRecord]

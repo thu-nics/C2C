@@ -25,16 +25,14 @@ from rich.table import Table
 from dotenv import find_dotenv, load_dotenv
 
 from camel.agents import ChatAgent
-from camel.models import ModelFactory
-from camel.types import ModelPlatformType, ModelType
 from camel.toolkits import FunctionTool, SearchToolkit
-from camel.configs import ChatGPTConfig
 
+from rosetta.workflow.retriever import search_engine
 from rosetta.workflow.selector import ContextSelector
 from rosetta.workflow.track import InteractionTracker, TreeTracker
 from rosetta.workflow.evaluation import extract_answer, exact_match, load_done_ids, run_research
-from rosetta.workflow.retriever import search_engine
 from rosetta.workflow.prompt import ERROR_CATEGORIES, ERROR_CATEGORIZATION_PROMPT, LLM_JUDGE_PROMPT
+from rosetta.workflow.camel_utils import create_model
 
 
 @dataclass
@@ -62,7 +60,8 @@ class EvalConfig:
     output_format: str
     resume: bool
     model_url: str
-    model_type: str
+    model_type: Optional[str]  # None uses provider defaults
+    model_provider: str  # Model provider: local, openai, gemini
     tokenizer: str
     mode: str
     main_to_search: str
@@ -72,6 +71,8 @@ class EvalConfig:
     num_workers: int
     eval_api_url: Optional[str] = None  # API URL for LLM judge, defaults to model_url
     eval_model_type: Optional[str] = None  # Model type for LLM judge, defaults to model_type
+    step_timeout: Optional[float] = None  # Timeout in seconds for agent step calls
+    enable_thinking: bool = False  # Enable thinking mode for main agent (local models only)
 
 
 def setup_env():
@@ -149,11 +150,14 @@ def evaluate_single(
 
     tracker = InteractionTracker(tokenizer=tokenizer)
     agent_tools = tools if use_single else None
-    main_agent = ChatAgent(
-        system_message="You are a helpful assistant.",
-        model=model,
-        tools=agent_tools
-    )
+    agent_kwargs = {
+        "system_message": "You are a helpful assistant.",
+        "model": model,
+        "tools": agent_tools,
+    }
+    if config.step_timeout is not None:
+        agent_kwargs["step_timeout"] = config.step_timeout
+    main_agent = ChatAgent(**agent_kwargs)
     tree_tracker = TreeTracker() if use_tree else None
     context_plan = create_context_plan(config, use_single, use_tree)
 
@@ -225,22 +229,22 @@ def worker_process(
     """Worker process that evaluates a chunk of examples."""
     setup_env()
 
-    model = ModelFactory.create(
-        model_platform=ModelPlatformType.OPENAI_COMPATIBLE_MODEL,
+    # Create main model with custom chat_template_kwargs for thinking mode
+    main_chat_template_kwargs = {"enable_thinking": config.enable_thinking} if config.model_provider == "local" else None
+    main_model = create_model(
+        provider=config.model_provider,
         model_type=config.model_type,
-        model_config_dict={
-            "temperature": 0.0,
-            "max_tokens": 32768,
-            "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
-        },
-        api_key="not-needed",
-        url=config.model_url,
+        model_url=config.model_url,
+        chat_template_kwargs=main_chat_template_kwargs,
     )
-    # model = ModelFactory.create(
-    #     model_platform=ModelPlatformType.OPENAI,
-    #     model_type=ModelType.GPT_4_1,
-    #     model_config_dict=ChatGPTConfig().as_dict()
-    # )
+
+    # Create search model (always disable thinking for search)
+    search_model = create_model(
+        provider=config.model_provider,
+        model_type=config.model_type,
+        model_url=config.model_url,
+    )
+
     tokenizer = AutoTokenizer.from_pretrained(config.tokenizer)
     tools = [FunctionTool(func) for func in tool_funcs]
     output_file = process_dir / f"worker_{worker_id}.jsonl"
@@ -251,8 +255,8 @@ def worker_process(
                 idx=ex["_idx"],
                 ex=ex,
                 config=config,
-                model=model,
-                search_model=model,
+                model=main_model,
+                search_model=search_model,
                 tokenizer=tokenizer,
                 tools=tools,
             )
@@ -312,7 +316,7 @@ def _evaluate_single_answer(rec: dict, api_url: str, model_type: str, prompt_tem
     }
 
     try:
-        response = requests.post(api_url, json=request_data, timeout=60)
+        response = requests.post(api_url, json=request_data, timeout=180)
         response.raise_for_status()
         result = response.json()
         content = result["choices"][0]["message"]["content"]
@@ -363,7 +367,7 @@ def _categorize_single_error(rec: dict, api_url: str, model_type: str) -> tuple[
     }
 
     try:
-        response = requests.post(api_url, json=request_data, timeout=60)
+        response = requests.post(api_url, json=request_data, timeout=180)
         response.raise_for_status()
         result = response.json()
         content = result["choices"][0]["message"]["content"].strip()
@@ -567,7 +571,10 @@ def main() -> None:
     parser.add_argument("--output-format", default="json", choices=["jsonl", "json"])
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--model-url", default="http://localhost:30000/v1")
-    parser.add_argument("--model-type", default="contextual-model")
+    parser.add_argument("--model-type", default=None,
+                        help="Model type (default: local='local', openai='gpt-4o-mini', gemini='gemini-3-flash-preview')")
+    parser.add_argument("--model-provider", default="local", choices=["local", "openai", "gemini"],
+                        help="Model provider: local (OpenAI-compatible), openai, or gemini")
     parser.add_argument("--tokenizer", default="Qwen/Qwen3-32B")
     parser.add_argument("--mode", default="oneflow", choices=["oneflow", "single", "tree"])
     parser.add_argument("--main_to_search", type=str, default="none", choices=["all", "initial", "none"])
@@ -577,6 +584,8 @@ def main() -> None:
     parser.add_argument("--num-workers", type=int, default=4, help="Number of parallel workers")
     parser.add_argument("--eval-api-url", type=str, default="http://localhost:30000/v1", help="API URL for LLM judge")
     parser.add_argument("--eval-model-type", type=str, default="default", help="Model type for LLM judge")
+    parser.add_argument("--step-timeout", type=float, default=None, help="Timeout in seconds for agent step calls")
+    parser.add_argument("--enable-thinking", action="store_true", help="Enable thinking mode for main agent (local models only)")
     args = parser.parse_args()
 
     config = EvalConfig(
@@ -589,6 +598,7 @@ def main() -> None:
         resume=args.resume,
         model_url=args.model_url,
         model_type=args.model_type,
+        model_provider=args.model_provider,
         tokenizer=args.tokenizer,
         mode=args.mode,
         main_to_search=args.main_to_search,
@@ -598,6 +608,8 @@ def main() -> None:
         num_workers=args.num_workers,
         eval_api_url=args.eval_api_url,
         eval_model_type=args.eval_model_type,
+        step_timeout=args.step_timeout,
+        enable_thinking=args.enable_thinking,
     )
 
     config.output.parent.mkdir(parents=True, exist_ok=True)
@@ -726,6 +738,7 @@ def main() -> None:
         f"  --resume {config.resume}",
         f"  --model-url {config.model_url}",
         f"  --model-type {config.model_type}",
+        f"  --model-provider {config.model_provider}",
         f"  --tokenizer {config.tokenizer}",
         f"  --mode {config.mode}",
         f"  --main_to_search {config.main_to_search}",
