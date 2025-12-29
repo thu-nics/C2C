@@ -2,6 +2,7 @@
 
 import os
 from typing import List, Optional, Any
+from dotenv import load_dotenv, find_dotenv
 
 from camel.messages import BaseMessage
 from camel.memories import MemoryRecord, ContextRecord
@@ -9,6 +10,10 @@ from camel.types import OpenAIBackendRole, RoleType, ModelPlatformType, ModelTyp
 from camel.models import ModelFactory
 from camel.configs import ChatGPTConfig
 
+
+def setup_env():
+    """Setup environment variables."""
+    load_dotenv(find_dotenv())
 
 def create_model(
     provider: str,
@@ -68,7 +73,7 @@ def create_model(
             api_key=api_key,
         )
     elif provider == "gemini":
-        model_type = model_type or "gemini-3-pro-preview"
+        model_type = model_type or "gemini-3-flash-preview"
         config = ChatGPTConfig(
             max_tokens=max_tokens,
             temperature=temperature,

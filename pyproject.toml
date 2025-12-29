@@ -19,6 +19,7 @@ dev = [ "pytest>=6.0", "pytest-cov>=2.0", "black>=22.0", "isort>=5.0", "flake8>=
 training = [ "datasets>=2.0", "accelerate>=0.20", "wandb>=0.13", "peft"]
 evaluation = [ "scikit-learn>=1.0", "matplotlib>=3.5", "seaborn>=0.11", "jsonlines", "openai", "math_verify", "latex2sympy2_extended", "spaces>=0.30.0"]
 serve = [ "fastapi>=0.110", "uvicorn[standard]>=0.23",]
+context = [ "camel-ai==0.2.80",]
 
 [project.urls]
 Homepage = "https://github.com/your-org/unified_memory"

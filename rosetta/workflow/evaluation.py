@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
 
-from camel.messages import BaseMessage
+from camel.agents import ChatAgent
 
 from rosetta.workflow.singleflow import single_research
 from rosetta.workflow.prompt import (
@@ -89,7 +89,7 @@ def extract_answer(pred_raw: str) -> Optional[str]:
     return None
 
 
-def _normalize_answer(s: str) -> str:
+def _normalize_answer(s: Optional[str]) -> str:
     """HotpotQA/SQuAD-style normalization for EM."""
     if s is None:
         return ""
@@ -196,14 +196,11 @@ class LLMJudge:
         self._model = model
         self._max_workers = max_workers
 
-    def _run(self, system: str, user: str) -> str:
-        """Run model and return response content."""
-        messages = [
-            BaseMessage.make_system_message(role_name="system", content=system).to_openai_message(),
-            BaseMessage.make_user_message(role_name="user", content=user).to_openai_message(),
-        ]
-        response = self._model.run(messages)
-        return response.msgs[0].content if response.msgs else ""
+    def _run(self, system: str, prompt: str) -> str:
+        """Run a prompt through the agent and return the response content."""
+        agent = ChatAgent(system_message=system, model=self._model)
+        response = agent.step(prompt)
+        return response.msgs[0].content
 
     def judge_answer(self, rec: dict) -> Tuple[dict, bool]:
         """Judge if predicted answer matches gold answer.
@@ -221,15 +218,11 @@ class LLMJudge:
         )
         try:
             content = self._run(LLM_JUDGE_SYSTEM, prompt)
-            # Parse JSON response
-            text = content.strip()
-            # Extract JSON from response (handle markdown code blocks)
-            if "```" in text:
-                text = text.split("```")[1]
-                if text.startswith("json"):
-                    text = text[4:]
-                text = text.strip()
-            result = json.loads(text)
+            # Strip <think>...</think> blocks and extract JSON
+            if "</think>" in content:
+                content = content.split("</think>")[-1]
+            start, end = content.find("{"), content.rfind("}")
+            result = json.loads(content[start : end + 1])
             is_correct = result.get("verdict", False)
             rec["correct_llm"] = is_correct
             rec["judge_confidence"] = result.get("confidence", "unknown")
@@ -276,6 +269,9 @@ class LLMJudge:
                 "You are an expert judge analyzing LLM research workflow failures.",
                 prompt,
             )
+            # Strip <think>...</think> blocks
+            if "</think>" in content:
+                content = content.split("</think>")[-1].strip()
             category = "Unknown"
             for cat in ERROR_CATEGORIES.keys():
                 if cat.lower() in content.lower():

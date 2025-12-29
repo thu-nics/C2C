@@ -20,10 +20,9 @@ from transformers import AutoTokenizer
 from rich.progress import Progress, BarColumn, TextColumn, TimeElapsedColumn
 from rich.console import Console
 from rich.table import Table
-from dotenv import find_dotenv, load_dotenv
 
 from camel.agents import ChatAgent
-from camel.toolkits import FunctionTool
+from camel.toolkits import FunctionTool, SearchToolkit
 
 from rosetta.workflow.retriever import search_engine
 from rosetta.workflow.selector import ContextSelector
@@ -35,7 +34,7 @@ from rosetta.workflow.evaluation import (
     run_research,
     LLMJudge,
 )
-from rosetta.workflow.camel_utils import create_model
+from rosetta.workflow.camel_utils import create_model, setup_env
 
 
 @dataclass
@@ -71,18 +70,13 @@ class EvalConfig:
     search: str
     search_to_main: str
     main: str
+    tools: list[str]
     num_workers: int
-    judge_model_provider: str = "gemini"  # Model provider for LLM judge (default: gemini)
-    judge_api_url: Optional[str] = None  # API URL for LLM judge (for local provider)
+    judge_model_provider: str = "local"  # Model provider for LLM judge (default: local)
+    judge_api_url: Optional[str] = None  # API URL for LLM judge (defaults to model_url)
     judge_model_type: Optional[str] = None  # Model type for LLM judge
     step_timeout: Optional[float] = None  # Timeout in seconds for agent step calls
     enable_thinking: bool = False  # Enable thinking mode for main agent (local models only)
-
-
-def setup_env():
-    """Setup environment variables."""
-    load_dotenv(find_dotenv())
-
 
 def create_context_plan(config: EvalConfig, use_single: bool, use_tree: bool) -> Optional[dict]:
     """Create context plan based on configuration."""
@@ -301,6 +295,10 @@ def aggregate_results(process_dir: Path, output_path: Path, output_format: str) 
     return total, correct
 
 
+JUDGE_FIELDS = ["idx", "hotpot_id", "question", "gold_answer", "pred_answer",
+                "correct_em", "correct_llm", "judge_confidence", "judge_reason", "error_category"]
+
+
 def read_jsonl(path: Path) -> list[dict]:
     """Read records from a JSONL file."""
     records = []
@@ -321,23 +319,21 @@ def write_jsonl(path: Path, records: list[dict]) -> None:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
 
-def run_llm_judge(
-    jsonl_path: Path,
-    config: EvalConfig,
-    max_workers: int = 32,
-) -> tuple[int, int, dict[str, list]]:
-    """Run LLM judge for answer correctness and error categorization.
+def get_jsonl_path(config: EvalConfig) -> Path:
+    """Get JSONL path from config output path."""
+    return config.output.with_suffix(".jsonl") if config.output.suffix == ".json" else config.output
 
-    Returns:
-        Tuple of (total_judged, correct_count, category_counts).
-    """
+
+def run_llm_judge(jsonl_path: Path, config: EvalConfig, max_workers: int = 32) -> tuple[int, int, dict[str, list]]:
+    """Run LLM judge for answer correctness and error categorization."""
     records = read_jsonl(jsonl_path)
 
-    # Create judge model (defaults to Gemini)
+    # Create judge model (local uses thinking by default)
     judge_model = create_model(
         provider=config.judge_model_provider,
-        model_type=config.judge_model_type,
-        model_url=config.judge_api_url,
+        model_type=config.judge_model_type or config.model_type,
+        model_url=config.judge_api_url or config.model_url,
+        chat_template_kwargs={"enable_thinking": True} if config.judge_model_provider == "local" else None,
     )
     judge = LLMJudge(judge_model, max_workers=max_workers)
 
@@ -349,22 +345,33 @@ def run_llm_judge(
         TextColumn("({task.completed}/{task.total})"),
         TimeElapsedColumn(),
     ) as progress:
-        # Judge answers
         task = progress.add_task("Judging answers", total=1)
         records, total_llm, correct_llm = judge.judge_batch(
-            records,
-            progress_callback=lambda c, t: progress.update(task, completed=c, total=t),
-        )
+            records, progress_callback=lambda c, t: progress.update(task, completed=c, total=t))
 
-        # Categorize errors
         task = progress.add_task("Categorizing errors", total=1)
         records, category_counts = judge.categorize_batch(
-            records,
-            progress_callback=lambda c, t: progress.update(task, completed=c, total=t),
-        )
+            records, progress_callback=lambda c, t: progress.update(task, completed=c, total=t))
 
+    # Write results
     write_jsonl(jsonl_path, records)
+
+    # Write judge-only results
+    judge_path = jsonl_path.with_name(jsonl_path.stem + "_judge.jsonl")
+    write_jsonl(judge_path, [{k: r.get(k) for k in JUDGE_FIELDS} for r in records])
+    print(f"Judge results: {judge_path}")
+
     return total_llm, correct_llm, category_counts
+
+
+def print_summary(total: int, correct_em: int, total_llm: int, correct_llm: int, category_counts: dict) -> None:
+    """Print evaluation summary."""
+    acc_em = (correct_em / total) if total else 0.0
+    acc_llm = (correct_llm / total_llm) if total_llm else 0.0
+    print(f"\nDone. evaluated={total}")
+    print(f"  Exact Match: EM={correct_em} acc={acc_em:.3f}")
+    print(f"  LLM Judge: correct={correct_llm} acc={acc_llm:.3f}")
+    _print_error_table(category_counts)
 
 
 def write_output_files(jsonl_path: Path, output_path: Path, output_format: str) -> None:
@@ -418,6 +425,30 @@ def _jsonl_to_json_array(jsonl_path: Path, json_path: Path) -> None:
         fout.write("\n]\n")
 
 
+def _print_error_table(category_counts: dict[str, list]) -> None:
+    """Print error category statistics with rich table."""
+    console = Console()
+    console.print("\n[bold]ERROR CATEGORY ANALYSIS[/bold]\n")
+
+    total_incorrect = sum(len(examples) for examples in category_counts.values())
+
+    table = Table(show_header=True, header_style="bold cyan", title="Error Distribution")
+    table.add_column("Rank", style="dim", width=6)
+    table.add_column("Category", style="magenta", min_width=30)
+    table.add_column("Count", justify="right", style="green")
+    table.add_column("Percentage", justify="right", style="yellow")
+
+    sorted_categories = sorted(category_counts.items(), key=lambda x: len(x[1]), reverse=True)
+
+    for rank, (category, examples) in enumerate(sorted_categories, 1):
+        count = len(examples)
+        percentage = (count / total_incorrect * 100) if total_incorrect > 0 else 0
+        table.add_row(f"{rank}", category, f"{count}/{total_incorrect}", f"{percentage:.1f}%")
+
+    console.print(table)
+    console.print()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--subset", default="distractor", choices=["distractor", "fullwiki"])
@@ -438,10 +469,19 @@ def main() -> None:
     parser.add_argument("--search", type=str, default="none", choices=["all", "initial", "none"])
     parser.add_argument("--search_to_main", type=str, default="qr", choices=["all", "qr"])
     parser.add_argument("--main", type=str, default="all", choices=["all", "none", "qr"])
+    parser.add_argument(
+        "--tools",
+        nargs="+",
+        default=["search_engine"],
+        choices=["search_engine", "search_wiki", "search_google", "search_tavily"],
+        help="Tools to enable (default: search_engine)",
+    )
     parser.add_argument("--num-workers", type=int, default=4, help="Number of parallel workers")
-    parser.add_argument("--judge-model-provider", type=str, default="gemini", choices=["local", "openai", "gemini"],
-                        help="Model provider for LLM judge (default: gemini)")
-    parser.add_argument("--judge-api-url", type=str, default=None, help="API URL for LLM judge (for local provider)")
+    parser.add_argument("--judge-only", action="store_true",
+                        help="Only run LLM judge on existing data (use with --output to specify input file)")
+    parser.add_argument("--judge-model-provider", type=str, default="local", choices=["local", "openai", "gemini"],
+                        help="Model provider for LLM judge (default: local)")
+    parser.add_argument("--judge-api-url", type=str, default=None, help="API URL for LLM judge (defaults to model-url)")
     parser.add_argument("--judge-model-type", type=str, default=None, help="Model type for LLM judge")
     parser.add_argument("--step-timeout", type=float, default=None, help="Timeout in seconds for agent step calls")
     parser.add_argument("--enable-thinking", action="store_true", help="Enable thinking mode for main agent (local models only)")
@@ -464,6 +504,7 @@ def main() -> None:
         search=args.search,
         search_to_main=args.search_to_main,
         main=args.main,
+        tools=args.tools,
         num_workers=args.num_workers,
         judge_model_provider=args.judge_model_provider,
         judge_api_url=args.judge_api_url,
@@ -473,6 +514,25 @@ def main() -> None:
     )
 
     config.output.parent.mkdir(parents=True, exist_ok=True)
+
+    # Judge-only mode: skip research, just run LLM judge on existing data
+    if args.judge_only:
+        jsonl_path = get_jsonl_path(config)
+        if not jsonl_path.exists():
+            print(f"Error: Input file not found: {jsonl_path}")
+            return
+
+        print(f"Running judge-only mode on: {jsonl_path}")
+        total_llm, correct_llm, category_counts = run_llm_judge(jsonl_path, config)
+
+        records = read_jsonl(jsonl_path)
+        total = len(records)
+        correct_em = sum(1 for r in records if r.get("correct_em", False))
+
+        write_output_files(jsonl_path, config.output, config.output_format)
+        print_summary(total, correct_em, total_llm, correct_llm, category_counts)
+        return
+
     process_dir = config.output.parent / "process"
     process_dir.mkdir(exist_ok=True)
 
@@ -503,10 +563,21 @@ def main() -> None:
 
     # Define tools as list of callables
     tool_funcs: list[Callable] = []
-    tool_funcs.append(search_engine)
-    # tool_funcs.append(SearchToolkit().search_wiki)
-    # tool_funcs.append(SearchToolkit().search_google)
-    # tool_funcs.append(SearchToolkit().search_tavily)
+    search_toolkit: Optional[SearchToolkit] = None
+    for tool_name in config.tools:
+        if tool_name == "search_engine":
+            tool_funcs.append(search_engine)
+            continue
+        if search_toolkit is None:
+            search_toolkit = SearchToolkit()
+        if tool_name == "search_wiki":
+            tool_funcs.append(search_toolkit.search_wiki)
+        elif tool_name == "search_google":
+            tool_funcs.append(search_toolkit.search_google)
+        elif tool_name == "search_tavily":
+            tool_funcs.append(search_toolkit.search_tavily)
+        else:
+            raise ValueError(f"Unsupported tool: {tool_name}")
 
     # Split examples into chunks
     num_workers = min(config.num_workers, len(examples))
@@ -555,19 +626,14 @@ def main() -> None:
 
     # Aggregate results
     total, correct_em = aggregate_results(process_dir, config.output, config.output_format)
-
-    # Determine JSONL path
-    if config.output_format == "jsonl":
-        final_jsonl = config.output
-    else:
-        final_jsonl = config.output.with_suffix(".jsonl")
+    jsonl_path = get_jsonl_path(config)
 
     # LLM judge for answer correctness and error categorization
     print("\nRunning LLM judge...")
-    total_llm, correct_llm, category_counts = run_llm_judge(final_jsonl, config)
+    total_llm, correct_llm, category_counts = run_llm_judge(jsonl_path, config)
 
-    # Write final output files with updated records
-    write_output_files(final_jsonl, config.output, config.output_format)
+    # Write final output files
+    write_output_files(jsonl_path, config.output, config.output_format)
 
     # Write summary with configuration and prompts
     acc_em = (correct_em / total) if total else 0.0
@@ -661,41 +727,10 @@ def main() -> None:
     summary_path = config.output.parent / "summary.txt"
     summary_path.write_text("\n".join(summary_lines), encoding="utf-8")
 
-    print(f"\nDone. evaluated={total}")
-    print(f"  Exact Match: EM={correct_em} acc={acc_em:.3f}")
-    print(f"  LLM Eval: correct={correct_llm} acc={acc_llm:.3f}")
     print(f"Output: {config.output}")
     print(f"CSV: {csv_path}")
     print(f"Summary: {summary_path}")
-
-    # Print error category statistics with rich table
-    console = Console()
-    console.print("\n[bold]ERROR CATEGORY ANALYSIS[/bold]\n")
-
-    total_incorrect = sum(len(examples) for examples in category_counts.values())
-
-    # Create table
-    table = Table(show_header=True, header_style="bold cyan", title="Error Distribution")
-    table.add_column("Rank", style="dim", width=6)
-    table.add_column("Category", style="magenta", min_width=30)
-    table.add_column("Count", justify="right", style="green")
-    table.add_column("Percentage", justify="right", style="yellow")
-
-    # Sort by count (descending)
-    sorted_categories = sorted(category_counts.items(), key=lambda x: len(x[1]), reverse=True)
-
-    for rank, (category, examples) in enumerate(sorted_categories, 1):
-        count = len(examples)
-        percentage = (count / total_incorrect * 100) if total_incorrect > 0 else 0
-        table.add_row(
-            f"{rank}",
-            category,
-            f"{count}/{total_incorrect}",
-            f"{percentage:.1f}%"
-        )
-
-    console.print(table)
-    console.print()
+    print_summary(total, correct_em, total_llm, correct_llm, category_counts)
 
 
 if __name__ == "__main__":

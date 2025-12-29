@@ -30,7 +30,7 @@ def _get_components() -> tuple[SGLangEmbedding, FaissStorage]:
     return _embedding, _storage
 
 
-def search_engine(query: str, top_k: int = 5) -> list[dict[str, Any]]:
+def search_engine(query: str, top_k: int = 5, reverse: bool = False) -> list[dict[str, Any]]:
     """Search local wiki database for information related to the query.
 
     Use this tool to find relevant local wiki database article snippets that may
@@ -39,6 +39,7 @@ def search_engine(query: str, top_k: int = 5) -> list[dict[str, Any]]:
     Args:
         query (str): The search query (e.g., "Scott Derrickson nationality").
         top_k (int): Number of results to return. (default: 5)
+        reverse (bool): Whether to reverse the order of results. (default: True)
 
     Returns:
         List[Dict[str, Any]]: A list of search results, each containing:
@@ -61,8 +62,10 @@ def search_engine(query: str, top_k: int = 5) -> list[dict[str, Any]]:
     query_vec = embedding.embed_list([query])[0]
     results = storage.query(VectorDBQuery(query_vector=query_vec, top_k=top_k))
 
+    ordered_results = reversed(results) if reverse else results
+
     responses = []
-    for i, r in enumerate(results, start=1):
+    for i, r in enumerate(ordered_results, start=1):
         title = r.record.payload.get("title", "Unknown")
         text = r.record.payload.get("text", "")
         # Extract content after title
