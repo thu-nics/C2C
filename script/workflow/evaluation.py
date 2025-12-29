@@ -454,7 +454,7 @@ def main() -> None:
     parser.add_argument("--subset", default="distractor", choices=["distractor", "fullwiki"])
     parser.add_argument("--split", default="validation")
     parser.add_argument("--limit", type=int, default=5)
-    parser.add_argument("--max-rounds", type=int, default=10)
+    parser.add_argument("--max-rounds", type=int, default=20)
     parser.add_argument("--output", default="local/evaluation/direct/hotpotqa.jsonl")
     parser.add_argument("--output-format", default="json", choices=["jsonl", "json"])
     parser.add_argument("--resume", action="store_true")
@@ -523,7 +523,11 @@ def main() -> None:
             return
 
         print(f"Running judge-only mode on: {jsonl_path}")
-        total_llm, correct_llm, category_counts = run_llm_judge(jsonl_path, config)
+        total_llm, correct_llm, category_counts = run_llm_judge(
+            jsonl_path,
+            config,
+            max_workers=config.num_workers,
+        )
 
         records = read_jsonl(jsonl_path)
         total = len(records)
@@ -630,7 +634,11 @@ def main() -> None:
 
     # LLM judge for answer correctness and error categorization
     print("\nRunning LLM judge...")
-    total_llm, correct_llm, category_counts = run_llm_judge(jsonl_path, config)
+    total_llm, correct_llm, category_counts = run_llm_judge(
+        jsonl_path,
+        config,
+        max_workers=config.num_workers,
+    )
 
     # Write final output files
     write_output_files(jsonl_path, config.output, config.output_format)

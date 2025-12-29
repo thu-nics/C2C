@@ -1,0 +1,25 @@
+base:
+  subset: distractor
+  split: validation
+  limit: 100
+  max_rounds: 20
+  output_format: json
+  model_url: http://localhost:30000/v1
+  model_provider: local
+  tokenizer: Qwen/Qwen3-32B
+  tools:
+    - search_engine
+  num_workers: 25
+
+runs:
+  - name: tree
+    mode: tree
+    output: local/evaluation/localSearch/tree/hotpotqa.json
+  - name: single
+    mode: single
+    enable_thinking: false
+    output: local/evaluation/localSearch/single/hotpotqa.json
+  - name: single_thinking
+    mode: single
+    enable_thinking: true
+    output: local/evaluation/localSearch/single_thinking/hotpotqa.json

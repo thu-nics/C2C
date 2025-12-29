@@ -12,7 +12,7 @@ class SGLangEmbedding(BaseEmbedding):
     def __init__(
         self,
         url: str = "http://localhost:30001",
-        model: str = "Qwen/Qwen3-Embedding-0.6B",
+        model: str = "Qwen/Qwen3-Embedding-8B",
     ):
         self.url = url
         self.model = model
