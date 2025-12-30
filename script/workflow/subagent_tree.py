@@ -85,12 +85,15 @@ if __name__ == "__main__":
 
     # question = "Which performance act has a higher instrument to person ratio, Badly Drawn Boy or Wolf Alice?"
     # question = "A Japanese manga series based on a 16 year old high school student Ichitaka Seto, is written and illustrated by someone born in what year?"
-    question = "Alfred Balk served as the secretary of the Committee on the Employment of Minority Groups in the News Media under which United States Vice President?"
+    # question = "Alfred Balk served as the secretary of the Committee on the Employment of Minority Groups in the News Media under which United States Vice President?"
 
     question = "How many copies of Roald Dahl's variation on a popular anecdote sold?"
 
+    state_rule_actions = ["execute", "plan", "answer", "rewind"]
+
     response, tracker = do_tree_research(
         question=question,
+        state_rule_actions=state_rule_actions,
         main_agent=main_agent,
         worker_model=worker_model,
         rewind_model=rewind_model,

@@ -584,8 +584,10 @@ def do_plan(
         StateResult with conversation records and new tasks.
     """
     plan_prompt = FlowFormater.build_action_prompt(["plan"], question, tasks, single_action=True)
+    plans = FlowParser.parse_tasks(state_conversation[1]["content"])
+    plan_str = " ".join([f"{i+1} - {plan}" for i, plan in enumerate(plans)])
     return StateResult(
-        feedback=state_conversation[1]["content"],
+        feedback=plan_str,
         records=[
             {"role": "user", "content": plan_prompt},
             state_conversation[1],
