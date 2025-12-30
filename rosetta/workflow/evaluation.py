@@ -131,6 +131,7 @@ def run_research(
     main_agent: "ChatAgent",
     tracker: Optional["InteractionTracker"] = None,
     search_model: Optional["BaseModelBackend"] = None,
+    think_model: Optional["BaseModelBackend"] = None,
     search_tools: Optional[List["FunctionTool"]] = None,
     context_plan: Optional[dict] = None,
     show_status: bool = True,
@@ -140,6 +141,7 @@ def run_research(
     worker_tools: Optional[List["FunctionTool"]] = None,
     tree_tracker: Optional[object] = None,
     max_rounds: int = 10,
+    state_rule_actions: Optional[List[str]] = None,
 ) -> Tuple[str, Optional["InteractionTracker"]]:
     """Dispatch to the requested research workflow."""
     mode = mode.lower()
@@ -175,6 +177,8 @@ def run_research(
             worker_model=worker_model,
             rewind_model=rewind_model,
             exam_model=exam_model,
+            think_model=think_model,
+            state_rule_actions=state_rule_actions,
             tracker=tracker,
             tree_tracker=tree_tracker,
             worker_tools=worker_tools,

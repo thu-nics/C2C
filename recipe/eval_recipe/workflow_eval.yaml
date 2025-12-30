@@ -14,12 +14,56 @@ base:
 runs:
   - name: tree
     mode: tree
-    output: local/evaluation/localSearch/tree/hotpotqa.json
-  - name: single
-    mode: single
-    enable_thinking: false
-    output: local/evaluation/localSearch/single/hotpotqa.json
-  - name: single_thinking
-    mode: single
-    enable_thinking: true
-    output: local/evaluation/localSearch/single_thinking/hotpotqa.json
+    output: local/evaluation/localSearch/tree_tEPRAE/hotpotqa.json
+    state_rule:
+      - execute
+      - plan
+      - rewind
+      - answer
+      - exam
+  
+  - name: tree
+    mode: tree
+    output: local/evaluation/localSearch/tree_tEPRATmE/hotpotqa.json
+    state_rule:
+      - execute
+      - plan
+      - rewind
+      - answer
+      - think
+      - exam
+
+  - name: tree
+    mode: tree
+    output: local/evaluation/localSearch/tree_tEPRATm/hotpotqa.json
+    state_rule:
+      - execute
+      - plan
+      - rewind
+      - answer
+      - think
+
+  # - name: tree
+  #   mode: tree
+  #   output: local/evaluation/localSearch/tree_tEPRA/hotpotqa.json
+  #   state_rule:
+  #     - execute
+  #     - plan
+  #     - rewind
+  #     - answer
+  # - name: tree
+  #   mode: tree
+  #   output: local/evaluation/localSearch/tree_tEPA/hotpotqa.json
+  #   state_rule:
+  #     - execute
+  #     - plan
+  #     - answer
+
+  # - name: single
+  #   mode: single
+  #   enable_thinking: false
+  #   output: local/evaluation/localSearch/single/hotpotqa.json
+  # - name: single_thinking
+  #   mode: single
+  #   enable_thinking: true
+  #   output: local/evaluation/localSearch/single_thinking/hotpotqa.json

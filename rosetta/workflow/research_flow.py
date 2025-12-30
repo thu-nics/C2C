@@ -11,7 +11,7 @@ from rosetta.workflow.track import InteractionTracker, record_interaction
 from rosetta.workflow.prompt import (
     SEARCH_TASK_DECOMPOSE_PROMPT, SEARCH_AGENT_PROMPT, RESPONSE_PROMPT_DIRECT
 )
-from rosetta.workflow.camel_utils import messages_to_memoryRecords, context_records_to_memory_records, MemoryRecord_flip_role
+from rosetta.workflow.camel_utils import messages_to_memoryRecords, context_records_to_memory_records, memoryRecord_flip_role
 
 def direct_subagent_research(
     question: str,

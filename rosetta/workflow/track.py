@@ -54,6 +54,8 @@ class InteractionTracker:
         self._concise_str = concise_str
         self._sort_by_llm_id = sort_by_llm_id
         self._llm_tools: dict[int, list] = {}  # llm_id -> tools list
+        self.state_sequence: list[str] = []
+        self.state_results: list = []
 
     def record(self, messages: list[dict], llm_id: int = 0) -> int:
         """Record an interaction from a message list.
@@ -691,7 +693,7 @@ class TreeNode:
     """A node in the tree structure."""
     step_idx: int
     parent_idx: Optional[int]
-    action: str  # execute, revise, rewind, answer
+    action: str  # execute, plan, think, rewind, exam, answer
     data: dict = field(default_factory=dict)
     children: list[int] = field(default_factory=list)
 
@@ -716,7 +718,7 @@ class TreeTracker:
         Args:
             node_id: Unique identifier for this node (monotonically increasing).
             parent_id: Node ID of parent (None for root).
-            action: Action type (execute, revise, rewind, answer).
+            action: Action type (execute, plan, think, rewind, exam, answer).
             data: Associated data (task, tasks, answer, etc.).
         """
         node = TreeNode(

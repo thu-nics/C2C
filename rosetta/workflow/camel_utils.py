@@ -102,7 +102,7 @@ def context_records_to_memory_records(
     """
     return [ctx_record.memory_record for ctx_record in records]
 
-def MemoryRecord_flip_role(message: MemoryRecord) -> MemoryRecord:
+def memoryRecord_flip_role(message: MemoryRecord) -> MemoryRecord:
     """Flip the role of a message."""
     if message.message.role_type == RoleType.USER:
         message.message.role_type = RoleType.ASSISTANT

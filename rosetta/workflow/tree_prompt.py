@@ -5,8 +5,8 @@ INIT_PROMPT = """As a Task Decomposer Agent, your objective is to analyze the gi
 You have been provided with the following objective:
 {question}
 
-Please format the subtasks as `revise` action and a numbered list within <tasks> tags, as demonstrated below:
-<action>revise</action>
+Please format the subtasks as `plan` action and a numbered list within <tasks> tags, as demonstrated below:
+<action>plan</action>
 <tasks>
 <task>Subtask 1</task>
 <task>Subtask 2</task>
@@ -24,45 +24,50 @@ TREE_ACTIONS = {
         "format": """<action>execute</action>
 <task>Self-contained subtask with necessary context</task>""",
         "guidelines": [
-            "When executing, include all needed context in the <task>",
-            "Frame the task to be self-contained - the subagent cannot see prior conversation",
-            "Include relevant context (e.g., candidate names, criteria) in the task itself",
+            "[execute] In <task>, include all context the subagent needs; assume it cannot see any prior conversation.",
+            "[execute] In <task>, restate any relevant names, constraints, criteria, and definitions needed to complete the subtask.",
         ],
         "with_param": True,
     },
-    "revise": {
-        "description": "Revise tasks - update the remaining task list based on new findings",
-        "format": """<action>revise</action>
+    "plan": {
+        "description": "Plan tasks - update the remaining task list based on new findings",
+        "format": """<action>plan</action>
 <tasks>
 <task>Revised subtask 1</task>
 <task>Revised subtask 2</task>
 </tasks>""",
         "guidelines": [
-            "Build on previous findings - if candidates were found, verify them against remaining criteria",
-            "If a subtask failed, try a different approach (e.g., search for specific candidate + criterion)",
-            "Avoid repetition - don't repeat failed searches with identical queries",
+            "[plan] Update only the remaining task list using new findings from previous steps.",
+            "[plan] You may split one subtask into multiple smaller subtasks when helpful. If no subtasks exist, decompose the main question into subtasks.",
+            "[plan] Each subtask must be narrowly scoped, achievable within a few searches, and have a clear desired result.",
+            "[plan] Do not repeat failed tasks; if something failed, change the approach.",
         ],
         "with_param": True,
     },
     "exam": {
         "description": "Exam - verify a previous step's result if it seems suspicious or critical",
         "format": """<action>exam</action>
-<step>step_index to examine (0-indexed)</step>""",
+<step>step_index to examine (1-indexed)</step>""",
         "guidelines": [
-            "Subagent results may be wrong - do not blindly trust them",
-            "If a result seems suspicious or inconsistent, use exam to verify before proceeding",
-            "Verify critical steps that affect the final answer",
+            "[exam] Use this action to verify a specific prior step when its result is suspicious, inconsistent, or high-impact.",
+            "[exam] Provide the 1-indexed <step> you want to re-check.",
         ],
         "with_param": True,
+    },
+    "think": {
+        "description": "Think - pause to reflect and get a concise assessment before choosing next action",
+        "format": """<action>think</action>""",
+        "guidelines": [
+            "[think] Use this action when the next operation is unclear and you need a brief assessment before proceeding.",
+        ],
+        "with_param": False,
     },
     "rewind": {
         "description": "Rewind - if the current path repeatedly fails and you need to backtrack to restart",
         "format": """<action>rewind</action>""",
         "guidelines": [
-            "Only use rewind when the entire workflow direction is fundamentally wrong",
-            "Use when you need to backtrack to a very early step to restart",
-            "Try different approaches after rewinding",
-            "Use rewind only if you must restart from an early step due to a major workflow error",
+            "[rewind] Use this action only when the current path has repeatedly failed and you must restart from an earlier step.",
+            "[rewind] After rewinding, switch to a different approach rather than repeating the same failed path.",
         ],
         "with_param": False,
     },
@@ -71,98 +76,13 @@ TREE_ACTIONS = {
         "format": """<action>answer</action>
 <answer>{{"justification":"1-2 short sentences", "answer":"final answer span"}}</answer>""",
         "guidelines": [
-            "Provide the final answer when you have enough verified information",
-            "Ensure justification is concise (1-2 sentences)",
-            "Answer should be the final answer span only",
+            "[answer] Use this action only when you have enough verified information to respond conclusively.",
+            "[answer] Keep the justification to 1–2 short sentences.",
+            "[answer] Put the final answer span in the \"answer\" field and the brief rationale in \"justification\".",
         ],
         "with_param": True,
     },
 }
-
-
-def build_decision_prompt(
-    actions: list[str],
-    question_var: str = "{question}",
-    tasks_var: str = "{tasks}",
-    include_tasks: bool = True,
-    single_action: bool = False,
-) -> str:
-    """Build a decision prompt from selected actions.
-
-    Args:
-        actions: List of action names to include (e.g., ["execute", "revise", "answer"])
-        question_var: Variable name for question (default: "{question}")
-        tasks_var: Variable name for tasks (default: "{tasks}")
-        include_tasks: Whether to include the "Remaining tasks:" section (default: True)
-        single_action: If True, simplify prompt for single action (no "Choose ONE action").
-            Raises AssertionError if len(actions) > 1.
-
-    Returns:
-        Formatted decision prompt string
-    """
-    if single_action:
-        assert len(actions) == 1, f"single_action=True requires exactly 1 action, got {len(actions)}"
-
-    prompt_lines = []
-
-    if not single_action:
-        prompt_lines.extend([
-            "Decide the next action based on current progress.",
-            "",
-        ])
-
-    prompt_lines.extend([
-        f"Question: {question_var}",
-        "",
-    ])
-
-    if include_tasks:
-        prompt_lines.extend([
-            "Remaining tasks:",
-            tasks_var,
-            "",
-        ])
-
-    if single_action:
-        prompt_lines.extend([
-            "Provide the details in this format:",
-            ""
-        ])
-    else:
-        prompt_lines.extend([
-            "Choose ONE action and output only its block:",
-            ""
-        ])
-
-    # Add action options
-    for i, action_name in enumerate(actions, 1):
-        if action_name not in TREE_ACTIONS:
-            raise ValueError(f"Unknown action: {action_name}")
-
-        action = TREE_ACTIONS[action_name]
-        if single_action:
-            # No numbered prefix or description for single action
-            prompt_lines.append(action["format"])
-        else:
-            prompt_lines.append(f"{i}. {action['description']}:")
-            prompt_lines.append(action["format"])
-        prompt_lines.append("")
-
-    # Collect all guidelines
-    all_guidelines = []
-    for action_name in actions:
-        all_guidelines.extend(TREE_ACTIONS[action_name]["guidelines"])
-
-    if all_guidelines:
-        prompt_lines.append("Guidelines:")
-        for guideline in all_guidelines:
-            prompt_lines.append(f"- {guideline}")
-
-    return "\n".join(prompt_lines)
-
-
-# Pre-built decision prompts for convenience
-DECISION_PROMPT = build_decision_prompt(["execute", "revise", "rewind", "answer"])
 
 WORKER_PROMPT = """You are a helpful search agent. Given a subtask, complete it by either:
 - Searching the internet if external information is needed.
@@ -170,20 +90,16 @@ WORKER_PROMPT = """You are a helpful search agent. Given a subtask, complete it 
 
 Provide a concise summary of your findings or answer."""
 
-EXAM_PROMPT = """You are a verification agent. Examine if the subagent's result is correct.
+EXAM_PROMPT = """You are a verification agent. A suspicious output has been observed, so verify correctness step by step.
 
 Original question: {question}
 
-Main agent context (previous steps):
-{main_context}
+Step {step_idx} ({step_state}) subagent chat history:
+{subagent_history}
 
-Step {step_idx} to verify:
-[Task] {task}
-[Subagent Result] {result}
-
-Verify:
+Verify each step:
 1. Does the result actually answer the task?
-2. Is the information consistent with the original question?
+2. Is the information consistent with the original question and main agent context?
 3. Are there any obvious errors or hallucinations?
 
 Output:
@@ -208,6 +124,38 @@ The summary replaces the assistant feedback for step N. Write it as a concise as
 - Start with "This approach will not work." then suggest a specific alternative (e.g., different search terms, verify spelling, try a related query).
 - Keep it actionable so the main agent knows what to try next.
 """
+
+# THINK_PROMPT = """You are a reflection agent. Carefully review the conversation history above.
+
+# Question: {question}
+
+# First think and analyze freely. Then provide concise, actionable suggestions for what to do next wrapped in <thought>...</thought>."""
+
+THINK_PROMPT = """You are a reflection agent. Review the conversation history above and assess the current situation.
+
+Question: {question}
+
+Instructions:
+1) Write your internal reasoning in <think>...</think>. Keep it brief and focused.
+2) Then write a concise, actionable assessment in <summarize>...</summarize>:
+   - What is the user trying to achieve?
+   - What information is missing or ambiguous (if any)?
+   - What specific next steps should be taken?
+
+Constraints:
+- Do NOT solve the question or provide the final answer.
+- Output ONLY the two tagged blocks, in the order shown.
+
+Output format:
+<think>
+...
+</think>
+<summarize>
+...
+</summarize>
+"""
+
+
 
 ANSWER_PROMPT = """Based on the research above, answer the question now.
 

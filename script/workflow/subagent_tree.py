@@ -17,19 +17,26 @@ from camel.configs import ChatGPTConfig, GeminiConfig
 from rosetta.workflow.track import InteractionTracker, TreeTracker
 from rosetta.workflow.treeflow import do_tree_research
 from rosetta.workflow.retriever import search_engine
-from rosetta.workflow.tree_prompt import TREE_ACTIONS, build_decision_prompt
 
 # Environment Variables
 load_dotenv(find_dotenv())
 
 # Local
-# model = ModelFactory.create(
-#     model_platform=ModelPlatformType.OPENAI_COMPATIBLE_MODEL,
-#     model_type="contextual-model",
-#     model_config_dict={"temperature": 0.0, "max_tokens": 32768, "extra_body": {"chat_template_kwargs": {"enable_thinking": False}}},
-#     api_key="not-needed",
-#     url="http://localhost:30000/v1",
-# )
+model = ModelFactory.create(
+    model_platform=ModelPlatformType.OPENAI_COMPATIBLE_MODEL,
+    model_type="contextual-model",
+    model_config_dict={"temperature": 0.0, "max_tokens": 32768, "extra_body": {"chat_template_kwargs": {"enable_thinking": False}}},
+    api_key="not-needed",
+    url="http://localhost:30000/v1",
+)
+
+thinking_model = ModelFactory.create(
+    model_platform=ModelPlatformType.OPENAI_COMPATIBLE_MODEL,
+    model_type="contextual-model",
+    model_config_dict={"temperature": 0.0, "max_tokens": 32768, "extra_body": {"chat_template_kwargs": {"enable_thinking": True}}},
+    api_key="not-needed",
+    url="http://localhost:30000/v1",
+)
 
 # GPT
 # model = ModelFactory.create(
@@ -41,16 +48,18 @@ load_dotenv(find_dotenv())
 # )
 
 # Gemini
-model = ModelFactory.create(
-    model_platform=ModelPlatformType.OPENAI_COMPATIBLE_MODEL,
-    model_type="gemini-3-flash-preview",
-    model_config_dict=ChatGPTConfig(max_tokens=32768, temperature=0.0, reasoning_effort="medium").as_dict(),
-    api_key=os.getenv("GEMINI_API_KEY"),
-    url="https://generativelanguage.googleapis.com/v1beta/openai/",
-)
+# model = ModelFactory.create(
+#     model_platform=ModelPlatformType.OPENAI_COMPATIBLE_MODEL,
+#     model_type="gemini-3-flash-preview",
+#     model_config_dict=ChatGPTConfig(max_tokens=32768, temperature=0.0, reasoning_effort="medium").as_dict(),
+#     api_key=os.getenv("GEMINI_API_KEY"),
+#     url="https://generativelanguage.googleapis.com/v1beta/openai/",
+# )
 
 worker_model = model
 rewind_model = model
+exam_model = thinking_model
+think_model = thinking_model
 
 main_system_prompt = "You are a helpful assistant."
 main_agent = ChatAgent(
@@ -75,13 +84,18 @@ if __name__ == "__main__":
     # tools.append(FunctionTool(SearchToolkit().search_metaso))  # successful
 
     # question = "Which performance act has a higher instrument to person ratio, Badly Drawn Boy or Wolf Alice?"
-    question = "A Japanese manga series based on a 16 year old high school student Ichitaka Seto, is written and illustrated by someone born in what year?"
+    # question = "A Japanese manga series based on a 16 year old high school student Ichitaka Seto, is written and illustrated by someone born in what year?"
+    question = "Alfred Balk served as the secretary of the Committee on the Employment of Minority Groups in the News Media under which United States Vice President?"
+
+    question = "How many copies of Roald Dahl's variation on a popular anecdote sold?"
 
     response, tracker = do_tree_research(
         question=question,
         main_agent=main_agent,
         worker_model=worker_model,
         rewind_model=rewind_model,
+        exam_model=exam_model,
+        think_model=think_model,
         tracker=tracker,
         tree_tracker=tree_tracker,
         worker_tools=tools,

@@ -12,12 +12,16 @@ from camel.types import ModelPlatformType, ModelType
 from camel.configs import ChatGPTConfig
 
 from rosetta.workflow.tree_prompt import (
-    INIT_PROMPT, REWIND_PROMPT, EXAM_PROMPT, SELECT_PROMPT, build_decision_prompt, TREE_ACTIONS
+    REWIND_PROMPT,
+    EXAM_PROMPT,
+    SELECT_PROMPT,
+    THINK_PROMPT,
+    TREE_ACTIONS,
 )
 from rosetta.workflow.prompt import SEARCH_AGENT_PROMPT as WORKER_PROMPT
 from rosetta.workflow.track import InteractionTracker, record_interaction
 from rosetta.workflow.display import StatusLogger
-from rosetta.workflow.camel_utils import messages_to_memoryRecords
+from rosetta.workflow.camel_utils import context_records_to_memory_records, messages_to_memoryRecords
 
 # select_model = ModelFactory.create(
 #     model_platform=ModelPlatformType.OPENAI,
@@ -34,11 +38,15 @@ class StateResult:
         feedback: Display string for status updates.
         records: Messages to write to main agent memory.
         tasks: New task list (None = keep current).
+        state: Workflow state that produced this result.
+        chat_history: Subagent chat history as MemoryRecords.
         kwargs: Special state-specific data (e.g., rewind_to, summary).
     """
     feedback: str
     records: List[Dict[str, str]] = field(default_factory=list)
     tasks: Optional[List[str]] = None
+    state: Optional[str] = None
+    chat_history: Optional[List[Any]] = None
     kwargs: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -55,6 +63,7 @@ class FlowParser:
     _CORRECTION_RE = re.compile(r"<correction>(.*?)</correction>", re.DOTALL)
     _ACTION_RE = re.compile(r"<action>(.*?)</action>", re.DOTALL)
     _SELECT_RE = re.compile(r"<select>(\d+)</select>")
+    _SUMMARIZE_RE = re.compile(r"<summarize>(.*?)</summarize>", re.DOTALL)
 
     @classmethod
     def parse_tasks(cls, text: str) -> List[str]:
@@ -113,6 +122,12 @@ class FlowParser:
         return int(match.group(1)) if match else None
 
     @classmethod
+    def parse_thought(cls, text: str) -> Optional[str]:
+        """Extract summary from <summarize>...</summarize> format."""
+        match = cls._SUMMARIZE_RE.search(text)
+        return match.group(1).strip() if match else None
+
+    @classmethod
     def parse_decision(cls, text: str) -> Tuple[str, dict]:
         """Parse main agent response to determine next state."""
         action = cls.parse_action(text)
@@ -120,8 +135,10 @@ class FlowParser:
             return "answer", {"answer": cls.parse_answer(text)}
         if action == "rewind":
             return "rewind", {}
-        if action == "revise":
-            return "revise", {"tasks": cls.parse_tasks(text)}
+        if action == "think":
+            return "think", {}
+        if action == "plan":
+            return "plan", {"tasks": cls.parse_tasks(text)}
         if action == "execute":
             return "execute", {"task": cls.parse_task(text)}
         if action == "exam":
@@ -152,19 +169,45 @@ class FlowFormater:
         return "\n\n".join(lines)
 
     @classmethod
-    def build_decision_prompt(cls, state: str, tasks: List[str], question: str) -> str:
-        """Build prompt based on available states from state rule.
+    def format_memory_records(cls, records: Optional[List[Any]]) -> str:
+        """Format MemoryRecord list into a readable chat history string."""
+        if not records:
+            return "(no chat history available)"
+        lines = []
+        for idx, record in enumerate(records, 1):
+            role = getattr(record, "role_at_backend", None)
+            role_name = role.name.lower() if role is not None else "unknown"
+            message = getattr(record, "message", None)
+            content = getattr(message, "content", "") if message is not None else ""
+            if not content and message is not None:
+                content = cls._format_tool_call(message)
+            if not content:
+                content = "(empty)"
+            lines.append(f"[{idx}] {role_name}:\n{content}")
+        return "\n\n".join(lines)
 
-        Args:
-            state: Current state (used to determine available next states).
-            tasks: Current task list.
-            question: Research question.
+    @classmethod
+    def _format_tool_call(cls, message: Any) -> str:
+        tool_calls = getattr(message, "tool_calls", None)
+        if tool_calls:
+            return f"[tool_calls] {tool_calls}"
+        func_name = getattr(message, "func_name", None)
+        args = getattr(message, "args", None)
+        result = getattr(message, "result", None)
+        tool_call_id = getattr(message, "tool_call_id", None)
+        if func_name or args is not None or result is not None or tool_call_id:
+            parts = []
+            if func_name:
+                parts.append(f"name={func_name}")
+            if tool_call_id:
+                parts.append(f"id={tool_call_id}")
+            if args is not None:
+                parts.append(f"args={args}")
+            if result is not None:
+                parts.append(f"result={result}")
+            return "[tool_call] " + " ".join(parts)
+        return ""
 
-        Returns:
-            Formatted decision prompt.
-        """
-        available_actions = state_rule(state)
-        return cls.build_action_prompt(available_actions, question, tasks)
 
     @classmethod
     def build_action_prompt(
@@ -185,29 +228,129 @@ class FlowFormater:
         Returns:
             Formatted decision prompt.
         """
-        if tasks:
-            tasks_str = "\n".join(f"- {t}" for t in tasks)
-            prompt_template = build_decision_prompt(actions, include_tasks=True, single_action=single_action)
-            return prompt_template.format(question=question, tasks=tasks_str)
+        tasks_str = "\n".join(f"- {t}" for t in tasks)
+        prompt_template = cls.build_decision_prompt(actions, include_tasks=True, single_action=single_action)
+        return prompt_template.format(question=question, tasks=tasks_str)
+
+
+    @classmethod
+    def build_decision_prompt(
+        cls,
+        actions: list[str],
+        question_var: str = "{question}",
+        tasks_var: str = "{tasks}",
+        include_tasks: bool = True,
+        single_action: bool = False,
+    ) -> str:
+        """Build a decision prompt from selected actions.
+
+        Args:
+            actions: List of action names to include (e.g., ["execute", "plan", "answer"])
+            question_var: Variable name for question (default: "{question}")
+            tasks_var: Variable name for tasks (default: "{tasks}")
+            include_tasks: Whether to include the "Remaining tasks:" section (default: True)
+            single_action: If True, simplify prompt for single action (no "Choose ONE action").
+                Raises AssertionError if len(actions) > 1.
+
+        Returns:
+            Formatted decision prompt string
+        """
+        if single_action:
+            assert len(actions) == 1, f"single_action=True requires exactly 1 action, got {len(actions)}"
+
+        prompt_lines = []
+
+        if not single_action:
+            prompt_lines.extend([
+                "Decide the next action based on current progress.",
+                "",
+            ])
+
+        prompt_lines.extend([
+            f"Question: {question_var}",
+            "",
+        ])
+
+        if include_tasks:
+            prompt_lines.extend([
+                "Remaining tasks:",
+                tasks_var,
+                "",
+            ])
+
+        if single_action:
+            prompt_lines.extend([
+                "Provide the details in this format:",
+                ""
+            ])
         else:
-            prompt_template = build_decision_prompt(actions, include_tasks=False, single_action=single_action)
-            return prompt_template.format(question=question)
+            prompt_lines.extend([
+                "Choose ONE action and output only its block:",
+                ""
+            ])
 
+        # Add action options
+        for i, action_name in enumerate(actions, 1):
+            if action_name not in TREE_ACTIONS:
+                raise ValueError(f"Unknown action: {action_name}")
 
+            action = TREE_ACTIONS[action_name]
+            if single_action:
+                # No numbered prefix or description for single action
+                prompt_lines.append(action["format"])
+            else:
+                prompt_lines.append(f"{i}. {action['description']}:")
+                prompt_lines.append(action["format"])
+            prompt_lines.append("")
 
-def state_rule(_current_state: str) -> List[str]:
+        # Collect all guidelines
+        all_guidelines = []
+        for action_name in actions:
+            all_guidelines.extend(TREE_ACTIONS[action_name]["guidelines"])
+
+        if all_guidelines:
+            prompt_lines.append("Guidelines:")
+            for guideline in all_guidelines:
+                prompt_lines.append(f"- {guideline}")
+
+        return "\n".join(prompt_lines)
+
+def state_rule(
+    _current_state: str,
+    state_sequence: Optional[List[StateResult]] = None,
+    full_state_rule_actions: Optional[List[str]] = None,
+) -> List[str]:
     """Define available next states based on current state.
 
-    Currently implements trivial rule: all states always available.
-    Override this function to implement state-dependent transitions.
+    Currently restricts the initial state to plan/think, otherwise returns all actions.
+    Override this function to implement custom transitions.
 
     Args:
-        _current_state: Current workflow state (unused in trivial implementation).
+        _current_state: Current workflow state.
+        state_sequence: Full sequence of prior StateResult objects (unused for now).
+        full_state_rule_actions: Full action list to filter from.
 
     Returns:
         List of available action names for next transition.
     """
-    return ["execute", "revise", "rewind", "answer"]
+    actions = full_state_rule_actions
+    if _current_state == "initial":
+        filtered = [action for action in actions if action in ("plan", "think")]
+        return filtered if filtered else list(actions)
+    if not state_sequence or not any(result.state == "plan" for result in state_sequence):
+        actions = [action for action in actions if action != "execute"]
+    if state_sequence:
+        last_stateResult = state_sequence[-1]
+        # if (last_stateResult.state == "execute") and last_stateResult.kwargs["num_tool_calls"] > 10:
+        #     filtered = [action for action in actions if action in ("rewind")]
+        #     return filtered if filtered else list(actions)
+        if last_stateResult.state == "rewind":
+            filtered = [action for action in actions if action in ("plan")]
+            return filtered if filtered else list(actions)
+        # if last_stateResult.state == "think":
+        #     filtered = [action for action in actions if action in ("plan")]
+        #     return filtered if filtered else list(actions)
+    return actions
 
 
 def update_main_history(
@@ -227,7 +370,15 @@ def update_main_history(
 
     # Add simplified records from StateResult
     if result.records:
-        main_agent.memory.write_records(messages_to_memoryRecords(result.records))
+        history = main_agent.chat_history
+        start_idx = 1 if history and history[0].get("role") == "system" else 0
+        step_idx = (len(history) - start_idx) // 2 + 1
+        records = [dict(r) for r in result.records]
+        for record in records:
+            if record.get("role") == "user":
+                record["content"] = f"Step {step_idx}: {record.get('content', '')}"
+                break
+        main_agent.memory.write_records(messages_to_memoryRecords(records))
 
 
 def _rollback_history(main_agent: ChatAgent, rewind_idx: int, summary: str):
@@ -285,7 +436,10 @@ def do_execute(
         tracker.register_tools(llm_id=step_idx + 1, tools=worker_tools)
 
     response = worker_agent.step(task)
-    feedback = response.msg.content
+    response_text = response.msg.content
+    tool_msgs_id = [i for i, msg in enumerate(worker_agent.chat_history) if msg['role'] == 'tool']
+    feedback = f"[#turn {len(tool_msgs_id)}]: {response_text}"
+    chat_history = context_records_to_memory_records(worker_agent.memory.retrieve())
 
     # Extract tool names from chat history
     tools_used = []
@@ -298,30 +452,20 @@ def do_execute(
 
     record_interaction(tracker, worker_agent.chat_history, llm_id=step_idx + 1)
 
+    kwargs = {"num_tool_calls": len(tool_msgs_id)}
+    if tools_used:
+        kwargs["tools_used"] = tools_used
+
     return StateResult(
         feedback=feedback,
         records=[
             {"role": "user", "content": task},
-            {"role": "assistant", "content": feedback},
+            {"role": "assistant", "content": response_text},
         ],
-        kwargs={"tools_used": tools_used} if tools_used else {},
+        state="execute",
+        chat_history=chat_history,
+        kwargs=kwargs,
     )
-
-
-def _execute_single_tool(
-    task: str,
-    tool: FunctionTool,
-    worker_model: BaseModelBackend,
-) -> Tuple[str, str]:
-    """Execute task with a single tool. Returns (tool_name, feedback)."""
-    worker_agent = ChatAgent(
-        system_message=WORKER_PROMPT,
-        model=worker_model,
-        tools=[tool]
-    )
-    response = worker_agent.step(task)
-    return tool.func.__name__, response.msg.content
-
 
 def do_wide_execute(
     task: str,
@@ -347,20 +491,35 @@ def do_wide_execute(
     Returns:
         StateResult with feedback and records to write.
     """
+    def _execute_single_tool(
+        task: str,
+        tool: FunctionTool,
+        worker_model: BaseModelBackend,
+    ) -> Tuple[str, str, List[Any]]:
+        """Execute task with a single tool. Returns (tool_name, feedback, chat_history)."""
+        worker_agent = ChatAgent(
+            system_message=WORKER_PROMPT,
+            model=worker_model,
+            tools=[tool]
+        )
+        response = worker_agent.step(task)
+        chat_history = context_records_to_memory_records(worker_agent.memory.retrieve())
+        return tool.func.__name__, response.msg.content, chat_history
+
     if len(worker_tools) == 1:
         # Single tool: just use regular execute
         return do_execute(task, worker_model, worker_tools, tracker, step_idx)
 
     # Execute each tool in parallel
-    results: List[Tuple[str, str]] = []
+    results: List[Tuple[str, str, List[Any]]] = []
     with ThreadPoolExecutor(max_workers=len(worker_tools)) as executor:
         futures = {
             executor.submit(_execute_single_tool, task, tool, worker_model): tool
             for tool in worker_tools
         }
         for future in as_completed(futures):
-            tool_name, feedback = future.result()
-            results.append((tool_name, feedback))
+            tool_name, feedback, chat_history = future.result()
+            results.append((tool_name, feedback, chat_history))
 
     # Build responses string for select agent (truncate to avoid token limits)
     # ~4 chars per token, 8k tokens total budget for responses
@@ -368,7 +527,7 @@ def do_wide_execute(
     max_chars_per_response = max_total_chars // len(results)
     responses_str = "\n\n".join(
         f"Response {i+1} (tool: {name}):\n{feedback[:max_chars_per_response]}{'...' if len(feedback) > max_chars_per_response else ''}"
-        for i, (name, feedback) in enumerate(results)
+        for i, (name, feedback, _) in enumerate(results)
     )
 
     # Use select agent to pick best response
@@ -389,7 +548,7 @@ def do_wide_execute(
     if selected_idx is None or selected_idx < 1 or selected_idx > len(results):
         selected_idx = 1
 
-    selected_tool, selected_feedback = results[selected_idx - 1]
+    selected_tool, selected_feedback, selected_history = results[selected_idx - 1]
     # tools_used = [name for name, _ in results]
 
     return StateResult(
@@ -398,36 +557,72 @@ def do_wide_execute(
             {"role": "user", "content": task},
             {"role": "assistant", "content": selected_feedback},
         ],
+        state="execute",
+        chat_history=selected_history,
         # kwargs={"tools_used": tools_used, "selected_tool": selected_tool},
         kwargs={"tools_used": [selected_tool]},
     )
 
 
-def do_revise(
+def do_plan(
     state_conversation: List[Dict[str, str]],
     data: dict,
     question: str,
     tasks: List[str],
+    main_agent: ChatAgent,
 ) -> StateResult:
-    """Process revised task list from decision.
+    """Process planned task list from decision.
 
     Args:
         state_conversation: The decision prompt/response messages.
         data: Parsed decision data containing tasks.
         question: Research question.
         tasks: Current task list.
+        main_agent: Main agent whose decision history is captured.
 
     Returns:
         StateResult with conversation records and new tasks.
     """
-    revise_prompt = FlowFormater.build_action_prompt(["revise"], question, tasks, single_action=False)
+    plan_prompt = FlowFormater.build_action_prompt(["plan"], question, tasks, single_action=True)
     return StateResult(
         feedback=state_conversation[1]["content"],
         records=[
-            {"role": "user", "content": revise_prompt},
+            {"role": "user", "content": plan_prompt},
             state_conversation[1],
         ],
+        state="plan",
+        chat_history=context_records_to_memory_records(main_agent.memory.retrieve()),
         tasks=data.get("tasks", []),
+    )
+
+
+def do_think(
+    think_model: BaseModelBackend,
+    main_agent: ChatAgent,
+    question: str,
+    tracker: InteractionTracker = None,
+) -> StateResult:
+    """Reflect on current status and suggest next steps."""
+    think_agent = ChatAgent(
+        system_message="You are a reflection agent that suggests next steps.",
+        model=think_model
+    )
+    context_records = main_agent.memory.retrieve()[1:] # skip system message of original agent
+    forward_records = context_records_to_memory_records(context_records)
+    think_agent.memory.write_records(forward_records)
+
+    response = think_agent.step(THINK_PROMPT.format(question=question))
+    record_interaction(tracker, think_agent.chat_history, llm_id=-2)
+
+    thought = FlowParser.parse_thought(response.msg.content) or response.msg.content
+    return StateResult(
+        feedback=thought,
+        records=[
+            {"role": "user", "content": "Think about next steps"},
+            {"role": "assistant", "content": thought},
+        ],
+        state="think",
+        chat_history=context_records_to_memory_records(think_agent.memory.retrieve()),
     )
 
 
@@ -452,13 +647,16 @@ def do_rewind(rewind_model: BaseModelBackend, messages: List[dict]) -> StateResu
     return StateResult(
         feedback=f"Rewinding to step {rewind_idx or 0}",
         records=[],  # Rewind doesn't add records directly
+        state="rewind",
+        chat_history=context_records_to_memory_records(rewind_agent.memory.retrieve()),
         kwargs={"rewind_to": rewind_idx or 0, "summary": summary or ""},
     )
 
 
 def do_exam(
     exam_model: BaseModelBackend,
-    messages: List[dict],
+    main_agent: ChatAgent,
+    state_results: List[StateResult],
     step_idx: int,
     question: str,
     tracker: InteractionTracker = None,
@@ -467,7 +665,8 @@ def do_exam(
 
     Args:
         exam_model: Model for exam agent.
-        messages: Chat history messages (standard format).
+        main_agent: Main agent whose history is provided as context.
+        state_results: Sequence of StateResults for locating the step's subagent history.
         step_idx: Step index to examine (0-indexed).
         question: Original question.
         tracker: Interaction tracker.
@@ -475,30 +674,24 @@ def do_exam(
     Returns:
         StateResult with exam verdict and records.
     """
-    # Skip system message
-    start_idx = 1 if messages and messages[0].get('role') == 'system' else 0
-
-    # Format main context (all steps before the examined one)
-    context_end = start_idx + step_idx * 2
-    main_context = FlowFormater.format_history_numbered(messages[:context_end]) if step_idx > 0 else "(no prior steps)"
-
-    # Get the task and result for the step to examine
-    task_idx = start_idx + step_idx * 2
-    result_idx = start_idx + step_idx * 2 + 1
-    task = messages[task_idx].get('content', '') if task_idx < len(messages) else ""
-    result = messages[result_idx].get('content', '') if result_idx < len(messages) else ""
-
     exam_agent = ChatAgent(
         system_message="You are a verification agent that checks for errors in research results.",
         model=exam_model
     )
+    main_context_records = main_agent.memory.retrieve()[1:-2]
+    exam_agent.memory.write_records(context_records_to_memory_records(main_context_records))
+
+    target_result = state_results[step_idx] if 0 <= step_idx < len(state_results) else None
+    step_state = target_result.state if target_result is not None else "unknown"
+    subagent_history = FlowFormater.format_memory_records(
+        target_result.chat_history if target_result is not None else None
+    )
 
     prompt = EXAM_PROMPT.format(
         question=question,
-        main_context=main_context,
         step_idx=step_idx,
-        task=task,
-        result=result
+        step_state=step_state,
+        subagent_history=subagent_history,
     )
     response = exam_agent.step(prompt)
     record_interaction(tracker, exam_agent.chat_history, llm_id=-1)  # Use -1 for exam agent
@@ -516,6 +709,8 @@ def do_exam(
             {"role": "user", "content": f"Examine step {step_idx}"},
             {"role": "assistant", "content": exam_result},
         ],
+        state="exam",
+        chat_history=context_records_to_memory_records(exam_agent.memory.retrieve()),
         kwargs={"verdict": verdict, "reason": reason, "correction": correction},
     )
 
@@ -525,7 +720,9 @@ def main_decision(
     main_agent: ChatAgent,
     tasks: List[str],
     question: str,
+    state_rule_actions: Optional[List[str]] = None,
     tracker: InteractionTracker = None,
+    state_results: Optional[List[StateResult]] = None,
 ) -> Tuple[str, dict, List[Dict[str, str]]]:
     """Master decision state: prompt main agent and determine next state.
 
@@ -538,11 +735,14 @@ def main_decision(
         tasks: Current task list.
         question: Research question.
         tracker: Interaction tracker.
+        state_results: Full sequence of prior StateResult objects.
 
     Returns:
         Tuple of (next_state, data, conversation).
     """
-    prompt = FlowFormater.build_decision_prompt(state, tasks, question)
+    state_sequence = state_results or (tracker.state_results if tracker is not None else None)
+    available_actions = state_rule(state, state_sequence, state_rule_actions)
+    prompt = FlowFormater.build_action_prompt(available_actions, question, tasks, single_action=len(available_actions) == 1)
     response = main_agent.step(prompt)
     record_interaction(tracker, main_agent.chat_history, llm_id=0)
 
@@ -636,6 +836,8 @@ def do_tree_research(
     worker_model: BaseModelBackend,
     rewind_model: BaseModelBackend = None,
     exam_model: BaseModelBackend = None,
+    think_model: BaseModelBackend = None,
+    state_rule_actions: Optional[List[str]] = ["execute", "plan", "think", "rewind", "answer", "exam"],
     tracker: InteractionTracker = None,
     tree_tracker: Any = None,
     worker_tools: List[FunctionTool] = None,
@@ -643,12 +845,13 @@ def do_tree_research(
     show_status: bool = True,
     focused: bool = False,
 ) -> Tuple[str, Optional[InteractionTracker]]:
-    """Tree-based research with execute/revise/rewind/exam/answer states.
+    """Tree-based research with execute/plan/think/rewind/exam/answer states.
 
     State Machine Structure:
         - _master_decision: Central hub that prompts main agent for next action
         - do_execute: Execute subtask via worker agent
-        - do_revise: Update task list from decision
+        - do_plan: Update task list from decision
+        - do_think: Reflect on current status and suggest next steps
         - do_rewind: Analyze history and backtrack (with post-processing)
         - do_exam: Verify a previous step's result
         - answer: Terminal state, return result
@@ -659,6 +862,7 @@ def do_tree_research(
         worker_model: Model for worker agent.
         rewind_model: Model for rewind agent. Defaults to worker_model.
         exam_model: Model for exam agent. Defaults to worker_model.
+        think_model: Model for think agent. Defaults to worker_model.
         tracker: Interaction tracker.
         tree_tracker: Tree structure tracker.
         worker_tools: List of tools for worker. Defaults to [Google search].
@@ -677,6 +881,12 @@ def do_tree_research(
         rewind_model = worker_model
     if exam_model is None:
         exam_model = worker_model
+    if think_model is None:
+        think_model = worker_model
+    if tracker is not None:
+        tracker.state_sequence = []
+        tracker.state_results = []
+    state_results: List[StateResult] = []
 
     state = "initial"  # Initial state: start by planning tasks
     tasks: List[str] = []
@@ -684,17 +894,10 @@ def do_tree_research(
     end_idx = 0
     node_id = 0  # monotonically increasing, never resets on rewind
 
-    # Initial state: use INIT_PROMPT to get initial task decomposition
-    init_prompt = INIT_PROMPT.format(question=question)
-    response = main_agent.step(init_prompt)
-    record_interaction(tracker, main_agent.chat_history, llm_id=0)
-    tasks = FlowParser.parse_tasks(response.msg.content)
-    state = "revise"  # Move past initial state
-
     for _ in range(max_rounds):
         # Master decision: determine next state
         next_state, data, conversation = main_decision(
-            state, main_agent, tasks, question, tracker
+            state, main_agent, tasks, question, state_rule_actions, tracker, state_results
         )
 
         # If focused mode and action requires parameters, re-prompt with single-action prompt
@@ -708,13 +911,17 @@ def do_tree_research(
             tree_tracker.add_node(node_id, parent_id, next_state, data)
             node_id += 1
 
+        if tracker is not None and next_state in TREE_ACTIONS:
+            tracker.state_sequence.append(next_state)
+
         if next_state == "answer":
             return data.get("answer", ""), tracker
 
         # Build status description
         status_map = {
             "execute": [data.get("task", "")] + tasks[1:],
-            "revise": ["Revising tasks"],
+            "plan": ["Planning tasks"],
+            "think": ["Thinking about next steps"],
             "rewind": ["Analyzing rewind point"],
             "exam": [f"Examining step {data.get('step', 0)}"],
         }
@@ -733,21 +940,27 @@ def do_tree_research(
                 tasks = tasks[1:] if tasks else []
                 end_idx += 1
 
-            elif next_state == "revise":
-                result = do_revise(conversation, data, question, tasks)
+            elif next_state == "plan":
+                result = do_plan(conversation, data, question, tasks, main_agent)
+
+            elif next_state == "think":
+                result = do_think(think_model, main_agent, question, tracker)
 
             elif next_state == "rewind":
                 result = do_rewind(rewind_model, main_agent.chat_history[:-2])
 
             elif next_state == "exam":
                 result = do_exam(
-                    exam_model, main_agent.chat_history[:-2], data.get("step", 0), question, tracker
+                    exam_model, main_agent, state_results, data.get("step", 0), question, tracker
                 )
 
             else:
                 break  # Unknown state
 
             # Update status display
+            state_results.append(result)
+            if tracker is not None:
+                tracker.state_results.append(result)
             tools_used = result.kwargs.get("tools_used")
             update_status(result.feedback, tools_used=tools_used)
 
@@ -771,12 +984,14 @@ def do_tree_research(
     # Fallback: force answer
     if tasks:
         tasks_str = "\n".join(f"- {t}" for t in tasks)
-        prompt_template = build_decision_prompt(["answer"], include_tasks=True, single_action=False)
+        prompt_template = FlowFormater.build_decision_prompt(["answer"], include_tasks=True, single_action=False)
         prompt = prompt_template.format(question=question, tasks=tasks_str)
     else:
-        prompt_template = build_decision_prompt(["answer"], include_tasks=False, single_action=False)
+        prompt_template = FlowFormater.build_decision_prompt(["answer"], include_tasks=False, single_action=False)
         prompt = prompt_template.format(question=question)
     response = main_agent.step(prompt)
     record_interaction(tracker, main_agent.chat_history, llm_id=0)
     answer = FlowParser.parse_answer(response.msg.content)
+    if tracker is not None:
+        tracker.state_sequence.append("answer")
     return answer or response.msg.content, tracker

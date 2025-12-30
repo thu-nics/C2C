@@ -49,6 +49,7 @@ class EvalRecord:
     correct_em: bool
     seconds: float
     tools_used: Optional[list[list[str]]] = None
+    state_sequence: Optional[list[str]] = None
     error: Optional[str] = None
 
 
@@ -72,6 +73,7 @@ class EvalConfig:
     main: str
     tools: list[str]
     num_workers: int
+    state_rule: list[str]
     judge_model_provider: str = "local"  # Model provider for LLM judge (default: local)
     judge_api_url: Optional[str] = None  # API URL for LLM judge (defaults to model_url)
     judge_model_type: Optional[str] = None  # Model type for LLM judge
@@ -135,6 +137,7 @@ def evaluate_single(
     config: EvalConfig,
     model,
     search_model,
+    think_model,
     tokenizer,
     tools: list[FunctionTool],
 ) -> EvalRecord:
@@ -163,6 +166,7 @@ def evaluate_single(
     pred_raw = ""
     pred = ""
     llm0_messages: Optional[list[dict[str, Any]]] = None
+    state_sequence: Optional[list[str]] = None
     err: Optional[str] = None
 
     try:
@@ -171,6 +175,7 @@ def evaluate_single(
             question=question,
             main_agent=main_agent,
             search_model=search_model if not use_single else None,
+            think_model=think_model if not use_single else None,
             tracker=tracker,
             search_tools=tools if not use_single else None,
             context_plan=context_plan,
@@ -181,7 +186,10 @@ def evaluate_single(
             exam_model=search_model if use_tree else None,
             worker_tools=tools if use_tree else None,
             tree_tracker=tree_tracker,
+            state_rule_actions=config.state_rule if use_tree else None,
         )
+        if use_tree and tracker is not None:
+            state_sequence = tracker.state_sequence
         extracted = extract_answer(pred_raw)
         pred = extracted if extracted is not None else pred_raw.strip()
         try:
@@ -213,6 +221,7 @@ def evaluate_single(
         correct_em=is_correct,
         seconds=seconds,
         tools_used=tools_used_per_round,
+        state_sequence=state_sequence,
         error=err,
     )
 
@@ -237,10 +246,17 @@ def worker_process(
     )
 
     # Create search model (always disable thinking for search)
-    search_model = create_model(
+    non_thinking_model = create_model(
         provider=config.model_provider,
         model_type=config.model_type,
         model_url=config.model_url,
+    )
+    # Create thinking model (always enable thinking for search)
+    thinking_model = create_model(
+        provider=config.model_provider,
+        model_type=config.model_type,
+        model_url=config.model_url,
+        chat_template_kwargs={"enable_thinking": True} if config.model_provider == "local" else None,
     )
 
     tokenizer = AutoTokenizer.from_pretrained(config.tokenizer)
@@ -254,7 +270,8 @@ def worker_process(
                 ex=ex,
                 config=config,
                 model=main_model,
-                search_model=search_model,
+                search_model=non_thinking_model,
+                think_model=thinking_model,
                 tokenizer=tokenizer,
                 tools=tools,
             )
@@ -384,7 +401,7 @@ def write_output_files(jsonl_path: Path, output_path: Path, output_format: str) 
     csv_path = output_path.with_suffix(".csv")
     csv_fields = ["idx", "hotpot_id", "question", "gold_answer", "pred_answer", "pred_raw",
                   "correct_em", "correct_llm", "judge_confidence", "judge_reason",
-                  "error_category", "tools_used", "seconds", "error"]
+                  "error_category", "tools_used", "state_sequence", "seconds", "error"]
 
     with jsonl_path.open("r", encoding="utf-8") as fin, csv_path.open("w", encoding="utf-8", newline="") as fout:
         writer = csv.DictWriter(fout, fieldnames=csv_fields)
@@ -396,9 +413,11 @@ def write_output_files(jsonl_path: Path, output_path: Path, output_format: str) 
             try:
                 obj = json.loads(line)
                 row = {k: obj.get(k) for k in csv_fields}
-                # Convert tools_used list to JSON string for CSV
+                # Convert list fields to JSON strings for CSV
                 if row.get("tools_used") is not None:
                     row["tools_used"] = json.dumps(row["tools_used"])
+                if row.get("state_sequence") is not None:
+                    row["state_sequence"] = json.dumps(row["state_sequence"])
                 writer.writerow(row)
             except json.JSONDecodeError:
                 continue
@@ -477,6 +496,12 @@ def main() -> None:
         help="Tools to enable (default: search_engine)",
     )
     parser.add_argument("--num-workers", type=int, default=4, help="Number of parallel workers")
+    parser.add_argument(
+        "--state-rule",
+        nargs="+",
+        default=["execute", "plan", "rewind", "answer", "think", "exam"],
+        help="Allowed tree actions (default: execute plan rewind answer)",
+    )
     parser.add_argument("--judge-only", action="store_true",
                         help="Only run LLM judge on existing data (use with --output to specify input file)")
     parser.add_argument("--judge-model-provider", type=str, default="local", choices=["local", "openai", "gemini"],
@@ -506,6 +531,7 @@ def main() -> None:
         main=args.main,
         tools=args.tools,
         num_workers=args.num_workers,
+        state_rule=args.state_rule,
         judge_model_provider=args.judge_model_provider,
         judge_api_url=args.judge_api_url,
         judge_model_type=args.judge_model_type,
@@ -676,16 +702,16 @@ def main() -> None:
         f"  --search_to_main {config.search_to_main}",
         f"  --main {config.main}",
         f"  --num-workers {config.num_workers}",
+        f"  --state-rule {' '.join(config.state_rule)}",
         "",
     ]
 
     # Prompt definitions per mode
     mode_prompts = {}
     if config.mode == "tree":
-        from rosetta.workflow.tree_prompt import INIT_PROMPT, DECISION_PROMPT, WORKER_PROMPT, REWIND_PROMPT
+        from rosetta.workflow.tree_prompt import INIT_PROMPT, WORKER_PROMPT, REWIND_PROMPT
         mode_prompts["tree"] = [
             ("INIT_PROMPT", INIT_PROMPT),
-            ("DECISION_PROMPT", DECISION_PROMPT),
             ("WORKER_PROMPT", WORKER_PROMPT),
             ("REWIND_PROMPT", REWIND_PROMPT),
         ]
