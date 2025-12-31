@@ -17,6 +17,7 @@ from rosetta.workflow.tree_prompt import (
     SELECT_PROMPT,
     THINK_PROMPT,
     TREE_ACTIONS,
+    EXECUTE_CHECK_PROMPT,
 )
 from rosetta.workflow.prompt import SEARCH_AGENT_PROMPT as WORKER_PROMPT
 from rosetta.workflow.track import InteractionTracker, record_interaction
@@ -64,6 +65,8 @@ class FlowParser:
     _ACTION_RE = re.compile(r"<action>(.*?)</action>", re.DOTALL)
     _SELECT_RE = re.compile(r"<select>(\d+)</select>")
     _SUMMARIZE_RE = re.compile(r"<summarize>(.*?)</summarize>", re.DOTALL)
+    _STATUS_RE = re.compile(r"<status>(.*?)</status>", re.DOTALL)
+    _NOTE_RE = re.compile(r"<note>(.*?)</note>", re.DOTALL)
 
     @classmethod
     def parse_tasks(cls, text: str) -> List[str]:
@@ -128,6 +131,17 @@ class FlowParser:
         return match.group(1).strip() if match else None
 
     @classmethod
+    def parse_completion_status(cls, text: str) -> Tuple[str, str]:
+        """Extract completion status and note. Returns (status, note)."""
+        status_match = cls._STATUS_RE.search(text)
+        note_match = cls._NOTE_RE.search(text)
+        status = status_match.group(1).strip().lower() if status_match else "success"
+        note = note_match.group(1).strip() if note_match else ""
+        if status not in ("success", "partial", "fail"):
+            status = "success"
+        return status, note
+
+    @classmethod
     def parse_decision(cls, text: str) -> Tuple[str, dict]:
         """Parse main agent response to determine next state."""
         action = cls.parse_action(text)
@@ -151,21 +165,25 @@ class FlowFormater:
 
     @classmethod
     def format_history_numbered(cls, messages: List[dict]) -> str:
-        """Format chat history messages as numbered steps for rewind agent.
+        """Format chat history messages as numbered turns for rewind agent.
 
         Args:
             messages: List of message dicts with 'role' and 'content' keys.
                       Should be subtask/feedback pairs (user/assistant alternating).
+
+        Note:
+            Turns are 1-indexed. Each turn = 2 messages (user + assistant pair).
+            Each action creates one turn, so turn N corresponds to step N.
         """
         lines = []
-        step = 0
+        turn = 1  # 1-indexed turns
         # Skip system message if present
         start_idx = 1 if messages and messages[0].get('role') == 'system' else 0
         for i in range(start_idx, len(messages), 2):
             subtask = messages[i].get('content', '') if i < len(messages) else ""
             feedback = messages[i + 1].get('content', '') if i + 1 < len(messages) else ""
-            lines.append(f"Step {step}:\n[Subtask] {subtask}\n[Feedback] {feedback}")
-            step += 1
+            lines.append(f"Turn {turn}:\n[Subtask] {subtask}\n[Feedback] {feedback}")
+            turn += 1
         return "\n\n".join(lines)
 
     @classmethod
@@ -214,7 +232,9 @@ class FlowFormater:
         cls,
         actions: List[str],
         question: str,
-        tasks: List[str],
+        pending_tasks: List[str],
+        in_progress_tasks: List[str] = None,
+        finished_tasks: List[str] = None,
         single_action: bool = False,
     ) -> str:
         """Build prompt with an explicit set of actions.
@@ -222,15 +242,26 @@ class FlowFormater:
         Args:
             actions: List of action names to include in the prompt.
             question: Research question.
-            tasks: Current task list.
+            pending_tasks: Tasks not yet started.
+            in_progress_tasks: Tasks partially completed.
+            finished_tasks: Tasks fully completed.
             single_action: If True, simplify prompt for single action.
 
         Returns:
             Formatted decision prompt.
         """
-        tasks_str = "\n".join(f"- {t}" for t in tasks)
+        in_progress_tasks = in_progress_tasks or []
+        finished_tasks = finished_tasks or []
+        pending_str = "\n".join(f"- {t}" for t in pending_tasks) if pending_tasks else "(none)"
+        in_progress_str = "\n".join(f"- {t}" for t in in_progress_tasks) if in_progress_tasks else "(none)"
+        finished_str = "\n".join(f"- {t}" for t in finished_tasks) if finished_tasks else "(none)"
         prompt_template = cls.build_decision_prompt(actions, include_tasks=True, single_action=single_action)
-        return prompt_template.format(question=question, tasks=tasks_str)
+        return prompt_template.format(
+            question=question,
+            pending_tasks=pending_str,
+            in_progress_tasks=in_progress_str,
+            finished_tasks=finished_str,
+        )
 
 
     @classmethod
@@ -238,7 +269,9 @@ class FlowFormater:
         cls,
         actions: list[str],
         question_var: str = "{question}",
-        tasks_var: str = "{tasks}",
+        pending_var: str = "{pending_tasks}",
+        in_progress_var: str = "{in_progress_tasks}",
+        finished_var: str = "{finished_tasks}",
         include_tasks: bool = True,
         single_action: bool = False,
     ) -> str:
@@ -247,8 +280,10 @@ class FlowFormater:
         Args:
             actions: List of action names to include (e.g., ["execute", "plan", "answer"])
             question_var: Variable name for question (default: "{question}")
-            tasks_var: Variable name for tasks (default: "{tasks}")
-            include_tasks: Whether to include the "Remaining tasks:" section (default: True)
+            pending_var: Variable name for pending tasks (default: "{pending_tasks}")
+            in_progress_var: Variable name for in-progress tasks (default: "{in_progress_tasks}")
+            finished_var: Variable name for finished tasks (default: "{finished_tasks}")
+            include_tasks: Whether to include task sections (default: True)
             single_action: If True, simplify prompt for single action (no "Choose ONE action").
                 Raises AssertionError if len(actions) > 1.
 
@@ -273,8 +308,14 @@ class FlowFormater:
 
         if include_tasks:
             prompt_lines.extend([
-                "Remaining tasks:",
-                tasks_var,
+                "Finished tasks:",
+                finished_var,
+                "",
+                "In-progress tasks:",
+                in_progress_var,
+                "",
+                "Pending tasks:",
+                pending_var,
                 "",
             ])
 
@@ -335,9 +376,11 @@ def state_rule(
     """
     actions = full_state_rule_actions
     if _current_state == "initial":
+        # Always think or plan first
         filtered = [action for action in actions if action in ("plan", "think")]
         return filtered if filtered else list(actions)
     if not state_sequence or not any(result.state == "plan" for result in state_sequence):
+        # If no plan, don't execute
         actions = [action for action in actions if action != "execute"]
     if state_sequence:
         last_stateResult = state_sequence[-1]
@@ -345,6 +388,7 @@ def state_rule(
         #     filtered = [action for action in actions if action in ("rewind")]
         #     return filtered if filtered else list(actions)
         if last_stateResult.state == "rewind":
+            # If rewind, must plan again
             filtered = [action for action in actions if action in ("plan")]
             return filtered if filtered else list(actions)
         # if last_stateResult.state == "think":
@@ -353,59 +397,117 @@ def state_rule(
     return actions
 
 
-def update_main_history(
-    main_agent: ChatAgent,
-    action: str,
-    result: StateResult,
-) -> None:
-    """Update main agent history by dropping decision messages and adding simplified records.
+class FlowContext:
+    """Manages main agent history, task lists, and workflow state."""
 
-    Args:
-        main_agent: Agent whose memory to modify.
-        action: The chosen action (for potential action-specific logic).
-        result: StateResult containing records to add.
-    """
-    # Pop the full decision prompt + response (2 messages)
-    main_agent.memory.pop_records(2)
+    def __init__(self, main_agent: ChatAgent):
+        self.main_agent = main_agent
+        # Task lists
+        self.pending: List[str] = []
+        self.in_progress: List[str] = []
+        self.finished: List[str] = []
+        # Tracking
+        self.round: int = 0  # Always increases (iteration counter)
+        self.step: int = 0   # Resets on rewind (execution step)
+        # Snapshots: round -> full state (action, result, tasks, step)
+        self._snapshots: Dict[int, dict] = {}
+        # Step-to-round mapping for rewind lookup
+        self._step_to_round: Dict[int, int] = {}
 
-    # Add simplified records from StateResult
-    if result.records:
-        history = main_agent.chat_history
-        start_idx = 1 if history and history[0].get("role") == "system" else 0
-        step_idx = (len(history) - start_idx) // 2 + 1
-        records = [dict(r) for r in result.records]
-        for record in records:
-            if record.get("role") == "user":
-                record["content"] = f"Step {step_idx}: {record.get('content', '')}"
-                break
-        main_agent.memory.write_records(messages_to_memoryRecords(records))
+    @property
+    def progress(self) -> int:
+        """Number of finished tasks."""
+        return len(self.finished)
 
+    @property
+    def total(self) -> int:
+        """Total number of tasks."""
+        return len(self.pending) + len(self.in_progress) + len(self.finished)
 
-def _rollback_history(main_agent: ChatAgent, rewind_idx: int, summary: str):
-    """Rollback history to a rewind point by popping from memory, then adding summary.
+    @property
+    def state_results(self) -> List[StateResult]:
+        """All state results in round order."""
+        return [self._snapshots[r]["result"] for r in sorted(self._snapshots.keys())]
 
-    Args:
-        main_agent: The main agent.
-        rewind_idx: Step index to rewind to **after**. Steps `0..rewind_idx` are kept; steps
-                   `rewind_idx+1..` are removed.
-        summary: Summary of failed path.
-    """
-    # Steps are (user, assistant) pairs after optional system message
-    history = main_agent.chat_history
-    start_idx = 1 if history and history[0].get("role") == "system" else 0
-    n = max(0, rewind_idx + 1)
-    keep_end = start_idx + n * 2 + 1  # keep through the user message of step `rewind_idx`
-    keep_end = min(max(keep_end, start_idx), len(history))
-    drop_count = len(history) - keep_end
-    if drop_count:
-        main_agent.memory.pop_records(drop_count)
+    @property
+    def state_sequence(self) -> List[str]:
+        """All actions in round order."""
+        return [self._snapshots[r]["action"] for r in sorted(self._snapshots.keys())]
 
-    # Add summary as assistant message
-    if summary:
-        summary_records = messages_to_memoryRecords([
-            {"role": "assistant", "content": summary}
-        ])
-        main_agent.memory.write_records(summary_records)
+    def prepare(self, action: str) -> None:
+        """Prepare state before action execution."""
+        if action == "execute":
+            if not self.in_progress and self.pending:
+                self.in_progress.append(self.pending.pop(0))
+
+    def snapshot(self, action: str, result: StateResult) -> None:
+        """Snapshot AFTER action execution. Records full state and increments round."""
+        self._snapshots[self.round] = {
+            "action": action,
+            "result": result,
+            "pending": list(self.pending),
+            "in_progress": list(self.in_progress),
+            "finished": list(self.finished),
+            "step": self.step,
+        }
+        self._step_to_round[self.step] = self.round
+        self.round += 1
+
+    def update_history(self, result: StateResult) -> None:
+        """Update main agent history based on state result."""
+        if result.state == "rewind":
+            # rewind_to is turn index (1-indexed from rewind agent)
+            rewind_to_turn = result.kwargs.get("rewind_to_step", 0)
+            summary = result.kwargs.get("summary", "")
+            # Rollback history to rewind point
+            # Keep rewind_to_turn turns, each turn = 2 messages (user + assistant)
+            history = self.main_agent.chat_history
+            start_idx = 1 if history and history[0].get("role") == "system" else 0
+            num_messages_to_keep = max(0, rewind_to_turn) * 2
+            keep_end = start_idx + num_messages_to_keep
+            keep_end = min(max(keep_end, start_idx), len(history))
+            drop_count = len(history) - keep_end - 1
+            if drop_count:
+                self.main_agent.memory.pop_records(drop_count)
+            # Add summary as assistant message
+            if summary:
+                self.main_agent.memory.write_records(
+                    messages_to_memoryRecords([{"role": "assistant", "content": summary}])
+                )
+        else:
+            self.main_agent.memory.pop_records(2)
+            if result.records:
+                self.main_agent.memory.write_records(
+                    messages_to_memoryRecords(result.records)
+                )
+
+    def update_tasks(self, result: StateResult) -> None:
+        """Update task lists and step based on state result."""
+        if result.state == "rewind":
+            # rewind_to is turn index (1-indexed from rewind agent)
+            rewind_to_turn = result.kwargs.get("rewind_to_step", 0)
+            # Translate turn to step: each action creates one turn, so turn N = step N
+            target_step = rewind_to_turn
+            # Find round for this step to restore snapshot
+            target_round = self._step_to_round.get(target_step)
+            if target_round is not None:
+                snapshot = self._snapshots.get(target_round, {})
+                self.pending = list(snapshot.get("pending", []))
+                self.in_progress = list(snapshot.get("in_progress", []))
+                self.finished = list(snapshot.get("finished", []))
+                self.step = snapshot.get("step", target_step)
+                # Clear step_to_round entries after current step
+                self._step_to_round = {s: r for s, r in self._step_to_round.items() if s <= self.step}
+        else:
+            # Step increments for all actions except rewind
+            self.step += 1
+            if result.state == "execute":
+                status = result.kwargs.get("completion_status", "success")
+                if status == "success" and self.in_progress:
+                    self.finished.append(self.in_progress.pop(0))
+            elif result.state == "plan":
+                self.in_progress = []
+                self.pending = result.tasks if result.tasks else []
 
 
 def do_execute(
@@ -415,7 +517,7 @@ def do_execute(
     tracker: InteractionTracker = None,
     step_idx: int = 0,
 ) -> StateResult:
-    """Execute a subtask using worker agent.
+    """Execute a subtask using worker agent with completion check.
 
     Args:
         task: The subtask to execute.
@@ -425,7 +527,7 @@ def do_execute(
         step_idx: Current step index.
 
     Returns:
-        StateResult with feedback and records to write.
+        StateResult with feedback, completion status, and records to write.
     """
     worker_agent = ChatAgent(
         system_message=WORKER_PROMPT,
@@ -438,7 +540,24 @@ def do_execute(
     response = worker_agent.step(task)
     response_text = response.msg.content
     tool_msgs_id = [i for i, msg in enumerate(worker_agent.chat_history) if msg['role'] == 'tool']
-    feedback = f"[#turn {len(tool_msgs_id)}]: {response_text}"
+
+    # Second step: check completion status
+    check_prompt = EXECUTE_CHECK_PROMPT.format(task=task)
+    check_response = worker_agent.step(check_prompt)
+    completion_status, completion_note = FlowParser.parse_completion_status(
+        check_response.msg.content
+    )
+
+    # Build feedback for status display (includes turn count and status)
+    feedback = f"| {completion_status.capitalize()} | Sub-round {len(tool_msgs_id)} : {response_text}"
+    if completion_status != "success" and completion_note:
+        feedback += f"\n{completion_note}"
+
+    # Build record content (response_text + optional completion note)
+    record_content = response_text
+    # if completion_status != "success" and completion_note:
+    #     record_content += f"\n{completion_note}"
+
     chat_history = context_records_to_memory_records(worker_agent.memory.retrieve())
 
     # Extract tool names from chat history
@@ -452,7 +571,11 @@ def do_execute(
 
     record_interaction(tracker, worker_agent.chat_history, llm_id=step_idx + 1)
 
-    kwargs = {"num_tool_calls": len(tool_msgs_id)}
+    kwargs = {
+        "num_tool_calls": len(tool_msgs_id),
+        "completion_status": completion_status,
+        "completion_note": completion_note,
+    }
     if tools_used:
         kwargs["tools_used"] = tools_used
 
@@ -460,7 +583,7 @@ def do_execute(
         feedback=feedback,
         records=[
             {"role": "user", "content": task},
-            {"role": "assistant", "content": response_text},
+            {"role": "assistant", "content": record_content},
         ],
         state="execute",
         chat_history=chat_history,
@@ -568,7 +691,9 @@ def do_plan(
     state_conversation: List[Dict[str, str]],
     data: dict,
     question: str,
-    tasks: List[str],
+    pending_tasks: List[str],
+    in_progress_tasks: List[str],
+    finished_tasks: List[str],
     main_agent: ChatAgent,
 ) -> StateResult:
     """Process planned task list from decision.
@@ -577,15 +702,19 @@ def do_plan(
         state_conversation: The decision prompt/response messages.
         data: Parsed decision data containing tasks.
         question: Research question.
-        tasks: Current task list.
+        pending_tasks: Tasks not yet started.
+        in_progress_tasks: Tasks partially completed.
+        finished_tasks: Tasks fully completed.
         main_agent: Main agent whose decision history is captured.
 
     Returns:
         StateResult with conversation records and new tasks.
     """
-    plan_prompt = FlowFormater.build_action_prompt(["plan"], question, tasks, single_action=True)
+    plan_prompt = FlowFormater.build_action_prompt(
+        ["plan"], question, pending_tasks, in_progress_tasks, finished_tasks, single_action=True
+    )
     plans = FlowParser.parse_tasks(state_conversation[1]["content"])
-    plan_str = " ".join([f"{i+1} - {plan}" for i, plan in enumerate(plans)])
+    plan_str = " ".join([f"[{i+1}] {plan}" for i, plan in enumerate(plans)])
     return StateResult(
         feedback=plan_str,
         records=[
@@ -636,7 +765,7 @@ def do_rewind(rewind_model: BaseModelBackend, messages: List[dict]) -> StateResu
         messages: Chat history messages (standard format).
 
     Returns:
-        StateResult with rewind_to and summary in kwargs.
+        StateResult with rewind_to (turn index, 1-indexed) and summary in kwargs.
     """
     history_str = FlowFormater.format_history_numbered(messages)
     rewind_agent = ChatAgent(
@@ -644,14 +773,14 @@ def do_rewind(rewind_model: BaseModelBackend, messages: List[dict]) -> StateResu
         model=rewind_model
     )
     response = rewind_agent.step(REWIND_PROMPT.format(history=history_str))
-    rewind_idx, summary = FlowParser.parse_rewind(response.msg.content)
+    rewind_turn, summary = FlowParser.parse_rewind(response.msg.content)
 
     return StateResult(
-        feedback=f"Rewinding to step {rewind_idx or 0}",
+        feedback=f"Rewinding to turn {rewind_turn or 0}",
         records=[],  # Rewind doesn't add records directly
         state="rewind",
         chat_history=context_records_to_memory_records(rewind_agent.memory.retrieve()),
-        kwargs={"rewind_to": rewind_idx or 0, "summary": summary or ""},
+        kwargs={"rewind_to_step": rewind_turn or 0, "summary": summary or ""},
     )
 
 
@@ -720,7 +849,9 @@ def do_exam(
 def main_decision(
     state: str,
     main_agent: ChatAgent,
-    tasks: List[str],
+    pending_tasks: List[str],
+    in_progress_tasks: List[str],
+    finished_tasks: List[str],
     question: str,
     state_rule_actions: Optional[List[str]] = None,
     tracker: InteractionTracker = None,
@@ -734,7 +865,9 @@ def main_decision(
     Args:
         state: Current workflow state.
         main_agent: Main agent for decision making.
-        tasks: Current task list.
+        pending_tasks: Tasks not yet started.
+        in_progress_tasks: Tasks partially completed.
+        finished_tasks: Tasks fully completed.
         question: Research question.
         tracker: Interaction tracker.
         state_results: Full sequence of prior StateResult objects.
@@ -744,7 +877,10 @@ def main_decision(
     """
     state_sequence = state_results or (tracker.state_results if tracker is not None else None)
     available_actions = state_rule(state, state_sequence, state_rule_actions)
-    prompt = FlowFormater.build_action_prompt(available_actions, question, tasks, single_action=len(available_actions) == 1)
+    prompt = FlowFormater.build_action_prompt(
+        available_actions, question, pending_tasks, in_progress_tasks, finished_tasks,
+        single_action=len(available_actions) == 1
+    )
     response = main_agent.step(prompt)
     record_interaction(tracker, main_agent.chat_history, llm_id=0)
 
@@ -760,7 +896,9 @@ def focused_substep(
     main_agent: ChatAgent,
     action: str,
     question: str,
-    tasks: List[str],
+    pending_tasks: List[str],
+    in_progress_tasks: List[str],
+    finished_tasks: List[str],
     tracker: InteractionTracker = None,
 ) -> Tuple[dict, List[Dict[str, str]]]:
     """Get focused parameters for an action by re-stepping with single-action prompt.
@@ -773,7 +911,9 @@ def focused_substep(
         main_agent: Main agent for decision making.
         action: The chosen action name.
         question: Research question.
-        tasks: Current task list.
+        pending_tasks: Tasks not yet started.
+        in_progress_tasks: Tasks partially completed.
+        finished_tasks: Tasks fully completed.
         tracker: Interaction tracker.
 
     Returns:
@@ -783,7 +923,9 @@ def focused_substep(
     main_agent.memory.pop_records(2)
 
     # Build focused prompt with only the selected action
-    prompt = FlowFormater.build_action_prompt([action], question, tasks, single_action=True)
+    prompt = FlowFormater.build_action_prompt(
+        [action], question, pending_tasks, in_progress_tasks, finished_tasks, single_action=True
+    )
     response = main_agent.step(prompt)
     record_interaction(tracker, main_agent.chat_history, llm_id=0)
 
@@ -794,42 +936,6 @@ def focused_substep(
         {"role": "assistant", "content": response.msg.content},
     ]
     return data, conversation
-
-
-def _post_process_rewind(
-    main_agent: ChatAgent,
-    result: StateResult,
-    tasks_at_step: Dict[int, list],
-    tree_tracker: Any = None,
-) -> Tuple[int, List[str]]:
-    """Post-process rewind state: rollback history and restore tasks.
-
-    Args:
-        main_agent: Main agent.
-        result: StateResult from do_rewind.
-        tasks_at_step: Snapshot of tasks at each step.
-        tree_tracker: Tree structure tracker.
-
-    Returns:
-        Tuple of (new_end_idx, restored_tasks).
-    """
-    rewind_to = result.kwargs.get("rewind_to", 0)
-    summary = result.kwargs.get("summary", "")
-
-    _rollback_history(main_agent, rewind_to, summary)
-
-    # Recompute end_idx from current history
-    history = main_agent.chat_history
-    start_idx = 1 if history and history[0].get("role") == "system" else 0
-    end_idx = max(0, (len(history) - start_idx) // 2)
-
-    # Restore tasks to the snapshot at rewound step
-    restored_tasks = list(tasks_at_step.get(rewind_to, []))
-
-    if tree_tracker is not None:
-        tree_tracker.mark_rewind(rewind_to, summary)
-
-    return end_idx, restored_tasks
 
 
 def do_tree_research(
@@ -885,43 +991,39 @@ def do_tree_research(
         exam_model = worker_model
     if think_model is None:
         think_model = worker_model
-    if tracker is not None:
-        tracker.state_sequence = []
-        tracker.state_results = []
-    state_results: List[StateResult] = []
 
-    state = "initial"  # Initial state: start by planning tasks
-    tasks: List[str] = []
-    tasks_at_step: Dict[int, list] = {}  # snapshot of tasks before each step
-    end_idx = 0
-    node_id = 0  # monotonically increasing, never resets on rewind
+    ctx = FlowContext(main_agent)
+    state = "initial"
 
     for _ in range(max_rounds):
         # Master decision: determine next state
         next_state, data, conversation = main_decision(
-            state, main_agent, tasks, question, state_rule_actions, tracker, state_results
+            state, main_agent, ctx.pending, ctx.in_progress, ctx.finished,
+            question, state_rule_actions, tracker, ctx.state_results
         )
 
         # If focused mode and action requires parameters, re-prompt with single-action prompt
         if focused and next_state in TREE_ACTIONS and TREE_ACTIONS[next_state].get("with_param", False):
             data, conversation = focused_substep(
-                main_agent, next_state, question, tasks, tracker
+                main_agent, next_state, question,
+                ctx.pending, ctx.in_progress, ctx.finished, tracker
             )
 
         if tree_tracker is not None:
             parent_id = tree_tracker.get_current_parent()
-            tree_tracker.add_node(node_id, parent_id, next_state, data)
-            node_id += 1
-
-        if tracker is not None and next_state in TREE_ACTIONS:
-            tracker.state_sequence.append(next_state)
+            tree_tracker.add_node(ctx.round, parent_id, next_state, data)
 
         if next_state == "answer":
+            # Assign ctx state to tracker for backward compatibility
+            if tracker is not None:
+                tracker.state_sequence = ctx.state_sequence + ["answer"]
+                tracker.state_results = ctx.state_results
             return data.get("answer", ""), tracker
 
         # Build status description
+        all_pending = ctx.in_progress + ctx.pending
         status_map = {
-            "execute": [data.get("task", "")] + tasks[1:],
+            "execute": [data.get("task", "")] + all_pending[1:],
             "plan": ["Planning tasks"],
             "think": ["Thinking about next steps"],
             "rewind": ["Analyzing rewind point"],
@@ -931,19 +1033,21 @@ def do_tree_research(
         if status_tasks is None:
             break  # Unknown state
 
-        with logger.round(end_idx, status_tasks, state=next_state.capitalize()) as update_status:
+        with logger.status(next_state, ctx.round, ctx.step, ctx.progress, ctx.total, status_tasks) as update_status:
+            ctx.prepare(next_state)
+
             # Dispatch to state handler
             if next_state == "execute":
-                tasks_at_step[end_idx] = list(tasks)
                 if tree_tracker is not None:
-                    tree_tracker.register_step(end_idx, node_id - 1)
-                result = do_execute(data["task"], worker_model, worker_tools, tracker, end_idx)
-                # result = do_wide_execute(data["task"], worker_model, worker_tools, question, tracker, end_idx)
-                tasks = tasks[1:] if tasks else []
-                end_idx += 1
+                    tree_tracker.register_step(ctx.step, ctx.round)
+                task = data["task"]
+                result = do_execute(task, worker_model, worker_tools, tracker, ctx.step)
 
             elif next_state == "plan":
-                result = do_plan(conversation, data, question, tasks, main_agent)
+                result = do_plan(
+                    conversation, data, question,
+                    ctx.pending, ctx.in_progress, ctx.finished, main_agent
+                )
 
             elif next_state == "think":
                 result = do_think(think_model, main_agent, question, tracker)
@@ -953,47 +1057,49 @@ def do_tree_research(
 
             elif next_state == "exam":
                 result = do_exam(
-                    exam_model, main_agent, state_results, data.get("step", 0), question, tracker
+                    exam_model, main_agent, ctx.state_results, data.get("step", 0), question, tracker
                 )
 
             else:
                 break  # Unknown state
 
+            # Update main agent history and tasks
+            ctx.update_history(result)
+            ctx.update_tasks(result)
+
+            # Snapshot AFTER action (records action, result, tasks, step)
+            ctx.snapshot(next_state, result)
+
             # Update status display
-            state_results.append(result)
-            if tracker is not None:
-                tracker.state_results.append(result)
             tools_used = result.kwargs.get("tools_used")
             update_status(result.feedback, tools_used=tools_used)
 
             # Record tools used for this round
             if tree_tracker is not None:
                 tree_tracker.record_tools_used(tools_used or [])
-
-            # Update main agent history (pop decision + add simplified records)
-            update_main_history(main_agent, next_state, result)
-
-            # Post-process kwargs (special handling)
-            if "rewind_to" in result.kwargs:
-                end_idx, tasks = _post_process_rewind(
-                    main_agent, result, tasks_at_step, tree_tracker
-                )
-            elif result.tasks is not None:
-                tasks = result.tasks
+                if result.state == "rewind":
+                    tree_tracker.mark_rewind(
+                        result.kwargs.get("rewind_to_step", 0),
+                        result.kwargs.get("summary", "")
+                    )
 
         state = next_state
 
     # Fallback: force answer
-    if tasks:
-        tasks_str = "\n".join(f"- {t}" for t in tasks)
-        prompt_template = FlowFormater.build_decision_prompt(["answer"], include_tasks=True, single_action=False)
-        prompt = prompt_template.format(question=question, tasks=tasks_str)
+    all_tasks = ctx.finished + ctx.in_progress + ctx.pending
+    if all_tasks:
+        prompt = FlowFormater.build_action_prompt(
+            ["answer"], question, ctx.pending, ctx.in_progress, ctx.finished
+        )
     else:
         prompt_template = FlowFormater.build_decision_prompt(["answer"], include_tasks=False, single_action=False)
         prompt = prompt_template.format(question=question)
     response = main_agent.step(prompt)
     record_interaction(tracker, main_agent.chat_history, llm_id=0)
     answer = FlowParser.parse_answer(response.msg.content)
+
+    # Assign ctx state to tracker for backward compatibility
     if tracker is not None:
-        tracker.state_sequence.append("answer")
+        tracker.state_sequence = ctx.state_sequence + ["answer"]
+        tracker.state_results = ctx.state_results
     return answer or response.msg.content, tracker

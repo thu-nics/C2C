@@ -25,22 +25,22 @@ TREE_ACTIONS = {
 <task>Self-contained subtask with necessary context</task>""",
         "guidelines": [
             "[execute] In <task>, include all context the subagent needs; assume it cannot see any prior conversation.",
-            "[execute] In <task>, restate any relevant names, constraints, criteria, and definitions needed to complete the subtask.",
+            "[execute] For in-progress tasks, state what was already found and focus only on the remaining information needed.",
         ],
         "with_param": True,
     },
     "plan": {
-        "description": "Plan tasks - update the remaining task list based on new findings",
+        "description": "Plan tasks - replace in-progress and pending tasks with a new task list",
         "format": """<action>plan</action>
 <tasks>
 <task>Revised subtask 1</task>
 <task>Revised subtask 2</task>
 </tasks>""",
         "guidelines": [
-            "[plan] Update only the remaining task list using new findings from previous steps.",
-            "[plan] You may split one subtask into multiple smaller subtasks when helpful. If no subtasks exist, decompose the main question into subtasks.",
+            "[plan] Replaces all in-progress and pending tasks with new tasks. Finished tasks are preserved.",
+            "[plan] You may split one subtask into multiple smaller subtasks when helpful.",
             "[plan] Each subtask must be narrowly scoped, achievable within a few searches, and have a clear desired result.",
-            "[plan] Do not repeat failed tasks; if something failed, change the approach.",
+            "[plan] For failed/partial tasks, change the approach rather than repeating the same task.",
         ],
         "with_param": True,
     },
@@ -115,12 +115,12 @@ You have been provided with the following history:
 {history}
 
 Please format your output within tags, as demonstrated below:
-<rewind_to>step_index</rewind_to>
+<rewind_to>turn_index</rewind_to>
 <summary>Summary text</summary>
 
-`rewind_to = N` means rewind to just after step N. For example, if you output 2, steps 3, 4, 5, ... are removed; steps 0, 1, 2 are kept.
+`rewind_to = N` means rewind to just after turn N (1-indexed). For example, if you output 2, turns 3, 4, 5, ... are removed; turns 1, 2 are kept.
 
-The summary replaces the assistant feedback for step N. Write it as a concise assistant reply:
+The summary replaces the assistant feedback for turn N. Write it as a concise assistant reply:
 - Start with "This approach will not work." then suggest a specific alternative (e.g., different search terms, verify spelling, try a related query).
 - Keep it actionable so the main agent knows what to try next.
 """
@@ -177,4 +177,16 @@ Responses:
 
 Select the response that best answers the question. Output the response number (1-indexed):
 <select>response_number</select>
+"""
+
+EXECUTE_CHECK_PROMPT = """Assess your completion status for this task:
+
+Task: {task}
+
+<status>success|partial|fail</status>
+<note>Brief explanation</note>
+
+- success: Task fully completed, needed information found
+- partial: Made progress but some aspects remain incomplete
+- fail: Could not complete (search failed, info not found, etc.)
 """

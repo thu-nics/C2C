@@ -33,17 +33,28 @@ class StatusLogger:
             t = f"{t} {suffix}"
         return f"[dim]  [{index}] {t}[/dim]"
 
-    def _format_status(self, round_idx: int, tasks: list, response: Optional[str] = None, state: str = "execute", done: bool = False, tools_used: Optional[list] = None) -> str:
-        """Format display content: tasks + optional current subagent response + tools used."""
-        task_count = len(tasks)
+    def _format_status(
+        self,
+        action: str,
+        round_idx: int,
+        step_idx: int,
+        progress: int,
+        total: int,
+        tasks: list,
+        response: Optional[str] = None,
+        done: bool = False,
+        tools_used: Optional[list] = None,
+    ) -> str:
+        """Format display content: ACTION | Round X | Step Y | Progress i/t."""
         queue_items = tasks[1:]
         checkmark = "[bold green]✓[/bold green] " if done else ""
         lines = [
-            f"{checkmark}[bold green]{escape(state)}[/bold green] [dim]|[/dim] "
-            f"Step {round_idx} [dim]|[/dim] "
-            f"Remaining {task_count}",
+            f"{checkmark}[bold green]{escape(action.capitalize())}[/bold green] [dim]|[/dim] "
+            f"Round {round_idx} [dim]|[/dim] "
+            f"Step {step_idx} [dim]|[/dim] "
+            f"Progress {progress}/{total}",
         ]
-        lines.append("  " + self._fmt_current(tasks[0] if tasks else None, index=round_idx if tasks else None))
+        lines.append("  " + self._fmt_current(tasks[0] if tasks else None, index=step_idx if tasks else None))
 
         # Show tools used
         if tools_used:
@@ -59,7 +70,7 @@ class StatusLogger:
             lines.append("  [dim]Queue:[/dim]")
             display_count = len(queue_items) if self.max_queue_preview is None else min(self.max_queue_preview, len(queue_items))
             for i in range(display_count):
-                idx = round_idx + 1 + i
+                idx = step_idx + 1 + i
                 suffix = ""
                 if self.max_queue_preview is not None and i == self.max_queue_preview - 1 and len(queue_items) > self.max_queue_preview:
                     suffix = f"(+{len(queue_items) - self.max_queue_preview} more)"
@@ -67,21 +78,21 @@ class StatusLogger:
         return "\n".join(lines)
 
     @contextmanager
-    def round(self, round_idx: int, tasks: list, state: str = "Execute"):
+    def status(self, action: str, round_idx: int, step_idx: int, progress: int, total: int, tasks: list):
         """Context manager: show spinner; yield updater for current subagent response."""
-        status_msg = self._format_status(round_idx, tasks, state=state)
+        status_msg = self._format_status(action, round_idx, step_idx, progress, total, tasks)
         last_response: Optional[str] = None
         last_tools: Optional[list] = None
         if self.console:
-            with self.console.status(status_msg) as status:
+            with self.console.status(status_msg) as st:
                 def update_response(resp: Optional[str], tools_used: Optional[list] = None):
                     nonlocal last_response, last_tools
                     last_response = resp
                     last_tools = tools_used
-                    status.update(self._format_status(round_idx, tasks, response=resp, state=state, tools_used=tools_used))
+                    st.update(self._format_status(action, round_idx, step_idx, progress, total, tasks, response=resp, tools_used=tools_used))
 
                 yield update_response
-            done_msg = self._format_status(round_idx, tasks, response=last_response, state=state, done=True, tools_used=last_tools)
+            done_msg = self._format_status(action, round_idx, step_idx, progress, total, tasks, response=last_response, done=True, tools_used=last_tools)
             self.console.print(done_msg, highlight=False)
         else:
             def _noop(*args, **kwargs):

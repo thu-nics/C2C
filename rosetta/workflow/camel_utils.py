@@ -218,3 +218,14 @@ def messages_to_memoryRecords(
     
     return message_list
 
+
+
+def memoryRecords_to_messages(
+    records: List[MemoryRecord]
+) -> List[dict]:
+    """Convert MemoryRecord list to standard message format.
+    
+    Args:
+        records: List of MemoryRecord objects.
+    """
+    return [record.to_openai_message() for record in records]
