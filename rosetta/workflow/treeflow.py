@@ -11,6 +11,7 @@ from camel.models import ModelFactory
 from camel.types import ModelPlatformType, ModelType
 from camel.configs import ChatGPTConfig
 
+from rosetta.workflow.feedback import FeedbackAgent
 from rosetta.workflow.tree_prompt import (
     REWIND_PROMPT,
     EXAM_PROMPT,
@@ -23,6 +24,7 @@ from rosetta.workflow.prompt import SEARCH_AGENT_PROMPT as WORKER_PROMPT
 from rosetta.workflow.track import InteractionTracker, record_interaction
 from rosetta.workflow.display import StatusLogger
 from rosetta.workflow.camel_utils import context_records_to_memory_records, messages_to_memoryRecords
+from rosetta.workflow.fewshot import FewShotManager
 
 # select_model = ModelFactory.create(
 #     model_platform=ModelPlatformType.OPENAI,
@@ -516,6 +518,8 @@ def do_execute(
     worker_tools: List[FunctionTool],
     tracker: InteractionTracker = None,
     step_idx: int = 0,
+    max_iteration: Optional[int] = None,
+    num_fewshot: int = 0,
 ) -> StateResult:
     """Execute a subtask using worker agent with completion check.
 
@@ -525,15 +529,23 @@ def do_execute(
         worker_tools: Tools available to worker.
         tracker: Interaction tracker.
         step_idx: Current step index.
-
+        max_iteration: Maximum number of iterations.
+        num_fewshot: Number of few-shot examples to add (default: 0).
     Returns:
         StateResult with feedback, completion status, and records to write.
     """
     worker_agent = ChatAgent(
         system_message=WORKER_PROMPT,
         model=worker_model,
-        tools=worker_tools
+        tools=worker_tools,
+        max_iteration=max_iteration
     )
+
+    # Add few-shot examples if requested
+    if num_fewshot > 0:
+        fewshot = FewShotManager()
+        fewshot.add_to_agent_memory(worker_agent, n=num_fewshot, selection="first")
+
     if tracker is not None:
         tracker.register_tools(llm_id=step_idx + 1, tools=worker_tools)
 
@@ -575,6 +587,7 @@ def do_execute(
         "num_tool_calls": len(tool_msgs_id),
         "completion_status": completion_status,
         "completion_note": completion_note,
+        "raw_chat_history": worker_agent.chat_history,  # For feedback evaluation
     }
     if tools_used:
         kwargs["tools_used"] = tools_used
@@ -589,6 +602,7 @@ def do_execute(
         chat_history=chat_history,
         kwargs=kwargs,
     )
+
 
 def do_wide_execute(
     task: str,
@@ -631,7 +645,7 @@ def do_wide_execute(
 
     if len(worker_tools) == 1:
         # Single tool: just use regular execute
-        return do_execute(task, worker_model, worker_tools, tracker, step_idx)
+        return do_execute(task, worker_model, worker_tools, tracker, step_idx, num_fewshot=2)
 
     # Execute each tool in parallel
     results: List[Tuple[str, str, List[Any]]] = []
@@ -992,6 +1006,9 @@ def do_tree_research(
     if think_model is None:
         think_model = worker_model
 
+    # Create feedback agent
+    feedback_agent = FeedbackAgent(model=worker_model)
+
     ctx = FlowContext(main_agent)
     state = "initial"
 
@@ -1041,7 +1058,14 @@ def do_tree_research(
                 if tree_tracker is not None:
                     tree_tracker.register_step(ctx.step, ctx.round)
                 task = data["task"]
-                result = do_execute(task, worker_model, worker_tools, tracker, ctx.step)
+                result = do_execute(task, worker_model, worker_tools, tracker, ctx.step, num_fewshot=2)
+
+                # Feedback evaluation for triplets
+                chat_history = result.kwargs.get("raw_chat_history", [])
+                triplets = FeedbackAgent.extract_triplets(chat_history)
+                if triplets:
+                    scores = feedback_agent.evaluate(triplets, task, ctx.step)
+                    feedback_agent.store(scores)
 
             elif next_state == "plan":
                 result = do_plan(
@@ -1103,3 +1127,4 @@ def do_tree_research(
         tracker.state_sequence = ctx.state_sequence + ["answer"]
         tracker.state_results = ctx.state_results
     return answer or response.msg.content, tracker
+

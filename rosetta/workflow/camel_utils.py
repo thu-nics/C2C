@@ -4,7 +4,7 @@ import os
 from typing import List, Optional, Any
 from dotenv import load_dotenv, find_dotenv
 
-from camel.messages import BaseMessage
+from camel.messages import BaseMessage, FunctionCallingMessage
 from camel.memories import MemoryRecord, ContextRecord
 from camel.types import OpenAIBackendRole, RoleType, ModelPlatformType, ModelType
 from camel.models import ModelFactory
@@ -119,20 +119,20 @@ def memoryRecord_flip_role(message: MemoryRecord) -> MemoryRecord:
     return message
 
 def messages_to_memoryRecords(
-    chat_history: List[dict], 
+    chat_history: List[dict],
     skip_system: bool = False
 ) -> List[MemoryRecord]:
     """Convert standard message format to CAMEL MemoryRecord list.
-    
+
     Args:
         chat_history: List of dictionaries with 'role' and 'content' keys.
-                     Roles can be 'user', 'assistant', 'system', 'function', 
+                     Roles can be 'user', 'assistant', 'system', 'function',
                      'tool', or 'developer'.
         skip_system: Whether to skip system messages. Default is True.
-    
+
     Returns:
         List of MemoryRecord objects suitable for CAMEL agents.
-    
+
     Example:
         >>> chat_history = [
         ...     {'role': 'system', 'content': 'You are a helpful assistant.'},
@@ -144,6 +144,14 @@ def messages_to_memoryRecords(
         2
     """
     message_list = []
+
+    # Build a mapping of tool_call_id -> function_name for tool messages
+    # that don't have func_name specified
+    tool_call_map = {}
+    for msg in chat_history:
+        if msg.get('role') == 'assistant' and 'tool_calls' in msg:
+            for tc in msg['tool_calls']:
+                tool_call_map[tc['id']] = tc['function']['name']
     
     for message in chat_history:
         role = message['role']
@@ -160,12 +168,37 @@ def messages_to_memoryRecords(
                 )
             )
         elif role == 'assistant':
+            # Check if this assistant message has tool_calls
+            tool_calls = message.get('tool_calls')
+            if tool_calls:
+                # Use FunctionCallingMessage for assistant messages with tool calls
+                # Extract function name and arguments from first tool_call
+                first_call = tool_calls[0]
+                func_name = first_call.get('function', {}).get('name')
+                args_str = first_call.get('function', {}).get('arguments', '{}')
+                import json
+                try:
+                    args = json.loads(args_str)
+                except json.JSONDecodeError:
+                    args = {}
+
+                base_msg = FunctionCallingMessage(
+                    role_name="assistant",
+                    role_type=RoleType.ASSISTANT,
+                    content=content,
+                    meta_dict={'tool_calls': tool_calls},
+                    func_name=func_name,
+                    args=args,
+                    tool_call_id=first_call.get('id')
+                )
+            else:
+                base_msg = BaseMessage.make_assistant_message(
+                    role_name="assistant",
+                    content=content
+                )
             message_list.append(
                 MemoryRecord(
-                    message=BaseMessage.make_assistant_message(
-                        role_name="assistant",
-                        content=content
-                    ),
+                    message=base_msg,
                     role_at_backend=OpenAIBackendRole.ASSISTANT
                 )
             )
@@ -186,20 +219,33 @@ def messages_to_memoryRecords(
                     message=BaseMessage(
                         role_name="function",
                         role_type=RoleType.DEFAULT,
-                        content=content
+                        content=content,
+                        meta_dict=None
                     ),
                     role_at_backend=OpenAIBackendRole.FUNCTION
                 )
             )
         elif role == 'tool':
+            # Tool messages use FunctionCallingMessage with FUNCTION role
+            tool_call_id = message.get('tool_call_id')
+            func_name = message.get('func_name')
+
+            # If func_name not provided, try to look it up from tool_call_map
+            if not func_name and tool_call_id:
+                func_name = tool_call_map.get(tool_call_id)
+
             message_list.append(
                 MemoryRecord(
-                    message=BaseMessage(
+                    message=FunctionCallingMessage(
                         role_name="tool",
                         role_type=RoleType.DEFAULT,
-                        content=content
+                        content=content,
+                        meta_dict=None,
+                        result=content,
+                        tool_call_id=tool_call_id,
+                        func_name=func_name
                     ),
-                    role_at_backend=OpenAIBackendRole.TOOL
+                    role_at_backend=OpenAIBackendRole.FUNCTION
                 )
             )
         elif role == 'developer':
@@ -208,7 +254,8 @@ def messages_to_memoryRecords(
                     message=BaseMessage(
                         role_name="developer",
                         role_type=RoleType.DEFAULT,
-                        content=content
+                        content=content,
+                        meta_dict=None
                     ),
                     role_at_backend=OpenAIBackendRole.DEVELOPER
                 )
