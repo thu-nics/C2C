@@ -74,6 +74,7 @@ def load_model(checkpoint_dirs: list, subfolder: str = "final", device: str = "c
         model_list=[base_llm] + sharer_llms,
         base_model_idx=0,
         projector_list=projector_list,
+        include_response=True,
     ).to(device).eval()
     
     # Load projector configs

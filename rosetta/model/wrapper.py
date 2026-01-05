@@ -299,8 +299,9 @@ class RosettaModel(nn.Module):
                     past_key_values=source_kv_copy,
                     labels=None,
                     use_cache=True, 
-                ).past_key_values
-        
+                ).past_key_values        
+        fused_kv_cache = clone_kv_cache(base_output_kv_cache)
+
         for target_layer_idx, entry in self.projector_dict[self.base_model_idx][source_model_idx].items():
             base_key_cache, base_value_cache = base_output_kv_cache[target_layer_idx]
             new_base_key_cache = base_key_cache[:, :, -new_length:, :]
@@ -327,15 +328,15 @@ class RosettaModel(nn.Module):
             agg_key, agg_value = projected_kv_list[0]
 
             # Update cache
-            base_output_kv_cache.key_cache[target_layer_idx][:, :, -new_length:, :] = agg_key
-            base_output_kv_cache.value_cache[target_layer_idx][:, :, -new_length:, :] = agg_value
+            fused_kv_cache.key_cache[target_layer_idx][:, :, -new_length:, :] = agg_key
+            fused_kv_cache.value_cache[target_layer_idx][:, :, -new_length:, :] = agg_value
 
         # Monkeypatch attention forward so the modified KV is used in *this* forward pass.
         hook_handlers = []  # list of (attn_module, orig_forward)
         for i in range(self.model_list[self.base_model_idx].config.num_hidden_layers):
             attn = self.model_list[self.base_model_idx].model.layers[i].self_attn
-            new_k = base_output_kv_cache.key_cache[i][:, :, -new_length:, :]
-            new_v = base_output_kv_cache.value_cache[i][:, :, -new_length:, :]
+            new_k = fused_kv_cache.key_cache[i][:, :, -new_length:, :]
+            new_v = fused_kv_cache.value_cache[i][:, :, -new_length:, :]
             orig_forward = RosettaModel._monkeypatch_qwen3_attention_forward(attn, new_k, new_v)
             hook_handlers.append((attn, orig_forward))
 
@@ -376,9 +377,6 @@ class RosettaModel(nn.Module):
         
         input_ids: If LongTensor, same input for all models. If List, per-model inputs.
         """
-        
-        # noqa
-        self.kv_cache_dict = dict()
 
         # Handle different input formats: if input_ids is a list, use per-model inputs
         if isinstance(input_ids, list):
@@ -392,6 +390,9 @@ class RosettaModel(nn.Module):
             base_attention_mask = attention_mask
             _, seqlen = input_ids.size() if input_ids is not None else (0, 0)
 
+        if seqlen > 1:
+            self.kv_cache_dict = dict()
+            
         num_sections = len(kv_cache_index) if kv_cache_index is not None else 1
 
         section_lengths = [kv_cache_index[i].shape[1] for i in range(num_sections)] if kv_cache_index is not None else [seqlen]
@@ -401,204 +402,186 @@ class RosettaModel(nn.Module):
         
         curr_base_kv_cache = past_key_values
 
-        if seqlen >= 1:
-            for i in range(num_sections):
-                start = section_starts[i]
-                end = section_starts[i + 1]
-                prefill_input_ids = base_input_ids[:, start:end] if base_input_ids is not None else None
-                prefill_attention_mask = base_attention_mask[:, :end] if base_attention_mask is not None else None
-                prefill_position_ids = position_ids[:, start:end] if position_ids is not None else None
-                prefill_labels = labels[:, start:end] if labels is not None else None
+        for i in range(num_sections):
+            start = section_starts[i]
+            end = section_starts[i + 1]
+            prefill_input_ids = base_input_ids[:, start:end] if base_input_ids is not None else None
+            prefill_attention_mask = base_attention_mask[:, :end] if base_attention_mask is not None else None
+            prefill_position_ids = position_ids[:, start:end] if position_ids is not None else None
+            prefill_labels = labels[:, start:end] if labels is not None else None
 
-                if i == num_sections - 1:
+            if i == num_sections - 1:
 
-                    if self.include_response:
-                        hook_handlers, base_output_kv_cache, source_output_kv_cache = self.register_hooks(input_ids=prefill_input_ids, attention_mask=prefill_attention_mask, position_ids=prefill_position_ids,
-                                                            base_kv_cache=self.kv_cache_dict[self.base_model_idx][self.base_model_idx],
-                                                            source_model_idx=1, 
-                                                            source_kv_cache=self.kv_cache_dict[self.base_model_idx][1])
+                if self.include_response:
+                    hook_handlers, base_output_kv_cache, source_output_kv_cache = self.register_hooks(input_ids=prefill_input_ids, attention_mask=prefill_attention_mask, position_ids=prefill_position_ids,
+                                                        base_kv_cache=self.kv_cache_dict[self.base_model_idx][self.base_model_idx],
+                                                        source_model_idx=1, 
+                                                        source_kv_cache=self.kv_cache_dict[self.base_model_idx][1])
 
-                    # calculate target model kvcache
-                    output = self.model_list[self.base_model_idx].forward(
-                        input_ids=prefill_input_ids,
-                        attention_mask=prefill_attention_mask, 
-                        position_ids=prefill_position_ids,
-                        past_key_values=curr_base_kv_cache,
-                        labels=prefill_labels,
-                        use_cache=use_cache, 
-                        output_attentions=output_attentions,
-                        output_hidden_states=output_hidden_states,
-                        *args,
-                        **kwargs
-                    )
+                # calculate target model kvcache
+                output = self.model_list[self.base_model_idx].forward(
+                    input_ids=prefill_input_ids,
+                    attention_mask=prefill_attention_mask, 
+                    position_ids=prefill_position_ids,
+                    past_key_values=curr_base_kv_cache,
+                    labels=prefill_labels,
+                    use_cache=True, 
+                    output_attentions=output_attentions,
+                    output_hidden_states=output_hidden_states,
+                    *args,
+                    **kwargs
+                )
 
-                    if self.include_response:
-                        self.remove_hooks(hook_handlers)
+                if self.include_response:
+                    self.remove_hooks(hook_handlers)
 
-                else:
+                self.kv_cache_dict[self.base_model_idx][self.base_model_idx] = clone_kv_cache(base_output_kv_cache)
+                self.kv_cache_dict[self.base_model_idx][1] = clone_kv_cache(source_output_kv_cache)
 
-                    output = self.model_list[self.base_model_idx].forward(
-                        input_ids=prefill_input_ids,
-                        attention_mask=prefill_attention_mask, 
-                        position_ids=prefill_position_ids,
-                        past_key_values=curr_base_kv_cache,
-                        labels=prefill_labels,
-                        use_cache=use_cache, 
-                        output_attentions=output_attentions,
-                        output_hidden_states=output_hidden_states,
-                        *args,
-                        **kwargs
-                    )
+            else:
 
+                output = self.model_list[self.base_model_idx].forward(
+                    input_ids=prefill_input_ids,
+                    attention_mask=prefill_attention_mask, 
+                    position_ids=prefill_position_ids,
+                    past_key_values=curr_base_kv_cache,
+                    labels=prefill_labels,
+                    use_cache=use_cache, 
+                    output_attentions=output_attentions,
+                    output_hidden_states=output_hidden_states,
+                    *args,
+                    **kwargs
+                )
+
+                if self.base_model_idx not in self.kv_cache_dict:
+                    self.kv_cache_dict[self.base_model_idx] = {}
+                if self.base_model_idx not in self.kv_cache_dict[self.base_model_idx]:
+                    self.kv_cache_dict[self.base_model_idx][self.base_model_idx] = None
+                self.kv_cache_dict[self.base_model_idx][self.base_model_idx] = clone_kv_cache(output.past_key_values)
+
+                curr_base_kv_cache: DynamicCache = output.past_key_values
+            
+                for source_model_idx in range(1, len(self.model_list)):
                     if self.base_model_idx not in self.kv_cache_dict:
                         self.kv_cache_dict[self.base_model_idx] = {}
-                    if self.base_model_idx not in self.kv_cache_dict[self.base_model_idx]:
-                        self.kv_cache_dict[self.base_model_idx][self.base_model_idx] = None
-                    self.kv_cache_dict[self.base_model_idx][self.base_model_idx] = output.past_key_values
+                    if source_model_idx not in self.kv_cache_dict[self.base_model_idx]:
+                        self.kv_cache_dict[self.base_model_idx][source_model_idx] = None
 
-                    curr_base_kv_cache: DynamicCache = output.past_key_values
-                
-                    for source_model_idx in range(1, len(self.model_list)):
-                        if self.base_model_idx not in self.kv_cache_dict:
-                            self.kv_cache_dict[self.base_model_idx] = {}
-                        if source_model_idx not in self.kv_cache_dict[self.base_model_idx]:
-                            self.kv_cache_dict[self.base_model_idx][source_model_idx] = None
+                    # Get model-specific input_ids and attention_mask
+                    if isinstance(input_ids, list):
+                        source_input_ids = input_ids[source_model_idx]
+                        source_attention_mask = attention_mask[source_model_idx] if attention_mask is not None else None
+                        source_prefill_input_ids = source_input_ids[:, start:end] if source_input_ids is not None else None
+                        source_prefill_attention_mask = source_attention_mask[:, :end] if source_attention_mask is not None else None
+                    else:
+                        # Backward compatibility: use same input for all models
+                        source_prefill_input_ids = prefill_input_ids
+                        source_prefill_attention_mask = prefill_attention_mask
 
-                        # Get model-specific input_ids and attention_mask
-                        if isinstance(input_ids, list):
-                            source_input_ids = input_ids[source_model_idx]
-                            source_attention_mask = attention_mask[source_model_idx] if attention_mask is not None else None
-                            source_prefill_input_ids = source_input_ids[:, start:end] if source_input_ids is not None else None
-                            source_prefill_attention_mask = source_attention_mask[:, :end] if source_attention_mask is not None else None
-                        else:
-                            # Backward compatibility: use same input for all models
-                            source_prefill_input_ids = prefill_input_ids
-                            source_prefill_attention_mask = prefill_attention_mask
+                    model = self.model_list[source_model_idx]
+                    was_training = model.training
+                    had_gc = getattr(model, "is_gradient_checkpointing", False)
 
-                        model = self.model_list[source_model_idx]
-                        was_training = model.training
-                        had_gc = getattr(model, "is_gradient_checkpointing", False)
+                    try:
+                        if was_training:
+                            model.eval()
+                        if had_gc:
+                            model.gradient_checkpointing_disable()
 
-                        try:
-                            if was_training:
-                                model.eval()
-                            if had_gc:
-                                model.gradient_checkpointing_disable()
+                        with torch.no_grad():
+                            out = model(
+                                input_ids=source_prefill_input_ids,
+                                attention_mask=source_prefill_attention_mask,
+                                position_ids=prefill_position_ids,
+                                past_key_values=self.kv_cache_dict[self.base_model_idx][source_model_idx],
+                                use_cache=True,
+                                return_dict=True,
+                            )
+                            curr_source_kv_cache = out.past_key_values
+                    finally:
+                        if had_gc:
+                            model.gradient_checkpointing_enable()
+                        if was_training:
+                            model.train()
+                    
+                    curr_source_kv_cache = hybrid_to_dynamic(curr_source_kv_cache)
+                    self.kv_cache_dict[self.base_model_idx][source_model_idx] = clone_kv_cache(curr_source_kv_cache)
 
-                            with torch.no_grad():
-                                out = model(
-                                    input_ids=source_prefill_input_ids,
-                                    attention_mask=source_prefill_attention_mask,
-                                    position_ids=prefill_position_ids,
-                                    past_key_values=self.kv_cache_dict[self.base_model_idx][source_model_idx],
-                                    use_cache=True,
-                                    return_dict=True,
-                                )
-                                curr_source_kv_cache = out.past_key_values
-                        finally:
-                            if had_gc:
-                                model.gradient_checkpointing_enable()
-                            if was_training:
-                                model.train()
+                # calculate source model kvcache and apply projections
+                if self.base_model_idx in self.projector_dict:
+                    # Iterate over all source models in projector_dict
+                    sharer_mask = kv_cache_index[i][0][0][0].item()
+                    if sharer_mask > 0:
+                        base_cache = clone_kv_cache(curr_base_kv_cache)
+
+                        # For parallel mode, accumulate residuals for each target layer
+                        parallel_delta_cache = {} if self.multi_source_fusion_mode == "parallel" else None
                         
-                        curr_source_kv_cache = hybrid_to_dynamic(curr_source_kv_cache)
-                        self.kv_cache_dict[self.base_model_idx][source_model_idx] = curr_source_kv_cache
+                        # Compute and apply projections (shared logic for both modes)
+                        for source_model_idx in self.projector_dict[self.base_model_idx].keys():
+                            # Check if this sharer is selected: bit (source_model_idx - 1)
+                            if not (sharer_mask & (1 << (source_model_idx - 1))):
+                                continue
+                            if self.multi_source_fusion_mode == "sequential":
+                                base_cache_ref = curr_base_kv_cache
+                            else:
+                                # Parallel: always project from the clean cloned base cache
+                                base_cache_ref = base_cache
 
-                    # calculate source model kvcache and apply projections
-                    if self.base_model_idx in self.projector_dict:
-                        # Iterate over all source models in projector_dict
-                        sharer_mask = kv_cache_index[i][0][0][0].item()
-                        if sharer_mask > 0:
-                            base_cache = clone_kv_cache(curr_base_kv_cache)
+                            for target_layer_idx, entry in self.projector_dict[self.base_model_idx][source_model_idx].items():
+                                # Get base KV cache slice for projection
+                                base_key_cache, base_value_cache = base_cache_ref[target_layer_idx]
+                                new_base_key_cache = base_key_cache[:, :, start:end, :]
+                                new_base_value_cache = base_value_cache[:, :, start:end, :]
+                                new_base_kv_cache = (new_base_key_cache, new_base_value_cache)
 
-                            # For parallel mode, accumulate residuals for each target layer
-                            parallel_delta_cache = {} if self.multi_source_fusion_mode == "parallel" else None
-                            
-                            # Compute and apply projections (shared logic for both modes)
-                            for source_model_idx in self.projector_dict[self.base_model_idx].keys():
-                                # Check if this sharer is selected: bit (source_model_idx - 1)
-                                if not (sharer_mask & (1 << (source_model_idx - 1))):
-                                    continue
+                                pair_list = entry
+
+                                projected_kv_list = []
+                                source_kv_list = []
+                                for source_model_layer_idx, projector_idx in pair_list:
+                                    source_key_cache, source_value_cache = self.kv_cache_dict[self.base_model_idx][source_model_idx][source_model_layer_idx]
+                                    new_source_key_cache = source_key_cache[:, :, start:end, :]
+                                    new_source_value_cache = source_value_cache[:, :, start:end, :]
+                                    new_source_kv_cache = (new_source_key_cache, new_source_value_cache)
+                                    projected_key, projected_value = self.projector_list[projector_idx].forward(
+                                        new_source_kv_cache,
+                                        new_base_kv_cache
+                                    )
+                                    projected_kv_list.append((projected_key, projected_value))
+                                    source_kv_list.append(new_source_kv_cache)
+
+                                # Use first projector result
+                                agg_key, agg_value = projected_kv_list[0]
+
+                                # Collect or apply projection based on mode
                                 if self.multi_source_fusion_mode == "sequential":
-                                    base_cache_ref = curr_base_kv_cache
+                                    # Sequential: apply immediately so next source sees updated cache
+                                    curr_base_kv_cache.key_cache[target_layer_idx][:, :, start:end, :] = agg_key
+                                    curr_base_kv_cache.value_cache[target_layer_idx][:, :, start:end, :] = agg_value
                                 else:
-                                    # Parallel: always project from the clean cloned base cache
-                                    base_cache_ref = base_cache
-
-                                for target_layer_idx, entry in self.projector_dict[self.base_model_idx][source_model_idx].items():
-                                    # Get base KV cache slice for projection
-                                    base_key_cache, base_value_cache = base_cache_ref[target_layer_idx]
-                                    new_base_key_cache = base_key_cache[:, :, start:end, :]
-                                    new_base_value_cache = base_value_cache[:, :, start:end, :]
-                                    new_base_kv_cache = (new_base_key_cache, new_base_value_cache)
-
-                                    pair_list = entry
-
-                                    projected_kv_list = []
-                                    source_kv_list = []
-                                    for source_model_layer_idx, projector_idx in pair_list:
-                                        source_key_cache, source_value_cache = self.kv_cache_dict[self.base_model_idx][source_model_idx][source_model_layer_idx]
-                                        new_source_key_cache = source_key_cache[:, :, start:end, :]
-                                        new_source_value_cache = source_value_cache[:, :, start:end, :]
-                                        new_source_kv_cache = (new_source_key_cache, new_source_value_cache)
-                                        projected_key, projected_value = self.projector_list[projector_idx].forward(
-                                            new_source_kv_cache,
-                                            new_base_kv_cache
+                                    # Parallel: accumulate residuals (agg - base) for this target layer
+                                    if target_layer_idx not in parallel_delta_cache:
+                                        parallel_delta_cache[target_layer_idx] = (
+                                            torch.zeros_like(new_base_key_cache),
+                                            torch.zeros_like(new_base_value_cache),
                                         )
-                                        projected_kv_list.append((projected_key, projected_value))
-                                        source_kv_list.append(new_source_kv_cache)
+                                    delta_key, delta_value = parallel_delta_cache[target_layer_idx]
+                                    delta_key = delta_key + (agg_key - new_base_key_cache)
+                                    delta_value = delta_value + (agg_value - new_base_value_cache)
+                                    parallel_delta_cache[target_layer_idx] = (delta_key, delta_value)
 
-                                    # Use first projector result
-                                    agg_key, agg_value = projected_kv_list[0]
+                        # For parallel mode, apply all accumulated residuals in one shot
+                        if self.multi_source_fusion_mode == "parallel":
+                            for target_layer_idx, (delta_key, delta_value) in parallel_delta_cache.items():
+                                base_key_cache, base_value_cache = base_cache[target_layer_idx]
+                                base_key_slice = base_key_cache[:, :, start:end, :]
+                                base_value_slice = base_value_cache[:, :, start:end, :]
+                                curr_base_kv_cache.key_cache[target_layer_idx][:, :, start:end, :] = base_key_slice + delta_key
+                                curr_base_kv_cache.value_cache[target_layer_idx][:, :, start:end, :] = base_value_slice + delta_value
 
-                                    # Collect or apply projection based on mode
-                                    if self.multi_source_fusion_mode == "sequential":
-                                        # Sequential: apply immediately so next source sees updated cache
-                                        curr_base_kv_cache.key_cache[target_layer_idx][:, :, start:end, :] = agg_key
-                                        curr_base_kv_cache.value_cache[target_layer_idx][:, :, start:end, :] = agg_value
-                                    else:
-                                        # Parallel: accumulate residuals (agg - base) for this target layer
-                                        if target_layer_idx not in parallel_delta_cache:
-                                            parallel_delta_cache[target_layer_idx] = (
-                                                torch.zeros_like(new_base_key_cache),
-                                                torch.zeros_like(new_base_value_cache),
-                                            )
-                                        delta_key, delta_value = parallel_delta_cache[target_layer_idx]
-                                        delta_key = delta_key + (agg_key - new_base_key_cache)
-                                        delta_value = delta_value + (agg_value - new_base_value_cache)
-                                        parallel_delta_cache[target_layer_idx] = (delta_key, delta_value)
-
-                            # For parallel mode, apply all accumulated residuals in one shot
-                            if self.multi_source_fusion_mode == "parallel":
-                                for target_layer_idx, (delta_key, delta_value) in parallel_delta_cache.items():
-                                    base_key_cache, base_value_cache = base_cache[target_layer_idx]
-                                    base_key_slice = base_key_cache[:, :, start:end, :]
-                                    base_value_slice = base_value_cache[:, :, start:end, :]
-                                    curr_base_kv_cache.key_cache[target_layer_idx][:, :, start:end, :] = base_key_slice + delta_key
-                                    curr_base_kv_cache.value_cache[target_layer_idx][:, :, start:end, :] = base_value_slice + delta_value
-
-                    output.past_key_values = curr_base_kv_cache
+                output.past_key_values = curr_base_kv_cache
                                                                              
-        # use base model for decode phase
-        else:
-            # Handle list input format for decode phase as well
-            decode_input_ids = input_ids[self.base_model_idx] if isinstance(input_ids, list) else input_ids
-            decode_attention_mask = attention_mask[self.base_model_idx] if isinstance(attention_mask, list) else attention_mask
-            
-            output = self.model_list[self.base_model_idx].forward(
-                input_ids=decode_input_ids,
-                attention_mask=decode_attention_mask,
-                position_ids=position_ids,
-                past_key_values=curr_base_kv_cache,
-                inputs_embeds=inputs_embeds,
-                labels=labels,
-                use_cache=use_cache,
-                output_attentions=output_attentions,
-                output_hidden_states=output_hidden_states,
-                cache_position=cache_position,
-                *args,
-                **kwargs
-            )
         return output
     
     @torch.no_grad()
@@ -633,6 +616,9 @@ class RosettaModel(nn.Module):
         - Samples tokens via rosetta.model.sampling.sample_token.
         Returns a tensor of shape [batch, prompt_len + generated_len] for the base model stream.
         """
+
+        self.kv_cache_dict = dict()
+
         # Derive number of tokens to generate
         # If max_new_tokens not provided, infer from max_length
         if isinstance(input_ids, list):
@@ -803,7 +789,6 @@ class RosettaModel(nn.Module):
                 *args,
                 **kwargs,
             )
-            current_past = decode_output.past_key_values
             last_logits = decode_output.logits[:, -1, :]
 
         # End streaming if streamer provided
