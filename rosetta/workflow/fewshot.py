@@ -137,7 +137,8 @@ class FewShotManager:
         agent,
         n: int = 3,
         selection: str = "first",
-        seed: Optional[int] = None
+        seed: Optional[int] = None,
+        add_separator: bool = True
     ) -> None:
         """Add few-shot examples to a ChatAgent's memory.
 
@@ -146,10 +147,26 @@ class FewShotManager:
             n: Number of examples to include.
             selection: Selection strategy - "first", "random", or "last".
             seed: Random seed for reproducible random selection.
+            add_separator: If True, adds a separator message after examples
+                          to distinguish them from the actual task.
         """
         from rosetta.workflow.camel_utils import messages_to_memoryRecords
 
         messages = self.format_as_chat_history(n, selection, seed)
+
+        # Add separator message if requested
+        if add_separator:
+            # Add user-assistant pair to maintain alternating pattern
+            separator_user = {
+                'role': 'user',
+                'content': f"The above are {n} example{'s' if n > 1 else ''} showing how to approach tasks. Please follow the same pattern for the actual task below."
+            }
+            separator_assistant = {
+                'role': 'assistant',
+                'content': "Understood. I'll follow the same pattern: formulate precise queries and provide accurate interpretations based on the results."
+            }
+            messages.extend([separator_user, separator_assistant])
+
         memory_records = messages_to_memoryRecords(messages)
         agent.memory.write_records(memory_records)
 

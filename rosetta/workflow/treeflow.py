@@ -544,7 +544,7 @@ def do_execute(
     # Add few-shot examples if requested
     if num_fewshot > 0:
         fewshot = FewShotManager()
-        fewshot.add_to_agent_memory(worker_agent, n=num_fewshot, selection="first")
+        fewshot.add_to_agent_memory(worker_agent, n=num_fewshot, selection="first", add_separator=True)
 
     if tracker is not None:
         tracker.register_tools(llm_id=step_idx + 1, tools=worker_tools)
