@@ -62,19 +62,24 @@ def search_engine(query: str, top_k: int = 5, reverse: bool = False) -> list[dic
     query_vec = embedding.embed_list([query])[0]
     results = storage.query(VectorDBQuery(query_vector=query_vec, top_k=top_k))
 
-    ordered_results = reversed(results) if reverse else results
+    ordered_results = list(reversed(results)) if reverse else results
 
     responses = []
-    for i, r in enumerate(ordered_results, start=1):
+    num_results = len(ordered_results)
+    for i, r in enumerate(ordered_results):
         title = r.record.payload.get("title", "Unknown")
         text = r.record.payload.get("text", "")
         # Extract content after title
         content = text.split("\n", 1)[-1] if "\n" in text else text
 
+        # When reversed, result_id goes from num_results down to 1
+        result_id = (num_results - i) if reverse else (i + 1)
+
         responses.append({
-            "result_id": i,
+            "result_id": result_id,
             "title": title,
-            "description": content[:500] + "..." if len(content) > 500 else content,
+            # "description": content[:500] + "..." if len(content) > 500 else content,
+            "description": content,
             "url": f"https://en.wikipedia.org/wiki/{title.replace(' ', '_')}",
         })
 
