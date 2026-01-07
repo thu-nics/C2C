@@ -20,24 +20,24 @@ Be specific and clear.
 # Tree workflow actions - modular action definitions
 TREE_ACTIONS = {
     "execute": {
-        "description": "Execute next task - proceed with the next subtask",
+        "description": "Execute - work on the current task",
         "format": """<action>execute</action>
 <task>Self-contained subtask with necessary context</task>""",
         "guidelines": [
-            "[execute] In <task>, include all context the subagent needs; assume it cannot see any prior conversation.",
-            "[execute] For in-progress tasks, state what was already found and focus only on the remaining information needed.",
+            "[execute] In <task>, include all and only the context the subagent needs; assume it cannot see any prior conversation.",
+            "[execute] Include what was already found; focus only on the remaining information needed.",
         ],
         "with_param": True,
     },
     "plan": {
-        "description": "Plan tasks - replace in-progress and pending tasks with a new task list",
+        "description": "Plan tasks - replace current and pending tasks with a new task list",
         "format": """<action>plan</action>
 <tasks>
 <task>Revised subtask 1</task>
 <task>Revised subtask 2</task>
 </tasks>""",
         "guidelines": [
-            "[plan] Replaces all in-progress and pending tasks with new tasks. Finished tasks are preserved.",
+            "[plan] Replaces all current and pending tasks with new tasks. Finished tasks are preserved.",
             "[plan] You may split one subtask into multiple smaller subtasks when helpful.",
             "[plan] Each subtask must be narrowly scoped, achievable within a few searches, and have a clear desired result.",
             "[plan] For failed/partial tasks, change the approach rather than repeating the same task.",
@@ -63,11 +63,12 @@ TREE_ACTIONS = {
         "with_param": False,
     },
     "rewind": {
-        "description": "Rewind - if the current path repeatedly fails and you need to backtrack to restart",
+        "description": "Rewind - backtrack when similar tasks fail multiple times",
         "format": """<action>rewind</action>""",
         "guidelines": [
-            "[rewind] Use this action only when the current path has repeatedly failed and you must restart from an earlier step.",
-            "[rewind] After rewinding, switch to a different approach rather than repeating the same failed path.",
+            "[rewind] Use when similar searches fail repeatedly (same query variations, same dead ends).",
+            "[rewind] Use when exploring the wrong entity or topic.",
+            "[rewind] After rewinding, switch to a different approach.",
         ],
         "with_param": False,
     },

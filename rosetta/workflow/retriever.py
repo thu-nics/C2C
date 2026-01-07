@@ -1,6 +1,6 @@
 """Local search engine retriever for HotpotQA articles."""
 
-from typing import Any
+from typing import Any, Dict, List
 
 from camel.storages import FaissStorage, VectorDBQuery
 
@@ -30,7 +30,7 @@ def _get_components() -> tuple[SGLangEmbedding, FaissStorage]:
     return _embedding, _storage
 
 
-def search_engine(query: str, top_k: int = 5, reverse: bool = False) -> list[dict[str, Any]]:
+def search_engine(query: str, top_k: int = 5, reverse: bool = False) -> List[Dict[str, Any]]:
     """Search local wiki database for information related to the query.
 
     Use this tool to find relevant local wiki database article snippets that may

@@ -21,7 +21,7 @@ from rosetta.workflow.tree_prompt import (
     EXECUTE_CHECK_PROMPT,
 )
 from rosetta.workflow.prompt import SEARCH_AGENT_PROMPT as WORKER_PROMPT
-from rosetta.workflow.track import InteractionTracker, record_interaction
+from rosetta.workflow.track import InteractionTracker, record_interaction, TreeTracker
 from rosetta.workflow.display import StatusLogger
 from rosetta.workflow.camel_utils import context_records_to_memory_records, messages_to_memoryRecords
 from rosetta.workflow.fewshot import FewShotManager
@@ -235,7 +235,7 @@ class FlowFormater:
         actions: List[str],
         question: str,
         pending_tasks: List[str],
-        in_progress_tasks: List[str] = None,
+        current_task: List[str] = None,
         finished_tasks: List[str] = None,
         single_action: bool = False,
     ) -> str:
@@ -245,23 +245,23 @@ class FlowFormater:
             actions: List of action names to include in the prompt.
             question: Research question.
             pending_tasks: Tasks not yet started.
-            in_progress_tasks: Tasks partially completed.
+            current_task: The current in-progress task (typically 0 or 1 item).
             finished_tasks: Tasks fully completed.
             single_action: If True, simplify prompt for single action.
 
         Returns:
             Formatted decision prompt.
         """
-        in_progress_tasks = in_progress_tasks or []
+        current_task = current_task or []
         finished_tasks = finished_tasks or []
         pending_str = "\n".join(f"- {t}" for t in pending_tasks) if pending_tasks else "(none)"
-        in_progress_str = "\n".join(f"- {t}" for t in in_progress_tasks) if in_progress_tasks else "(none)"
+        current_str = "\n".join(f"- {t}" for t in current_task) if current_task else "(none)"
         finished_str = "\n".join(f"- {t}" for t in finished_tasks) if finished_tasks else "(none)"
         prompt_template = cls.build_decision_prompt(actions, include_tasks=True, single_action=single_action)
         return prompt_template.format(
             question=question,
             pending_tasks=pending_str,
-            in_progress_tasks=in_progress_str,
+            current_task=current_str,
             finished_tasks=finished_str,
         )
 
@@ -272,7 +272,7 @@ class FlowFormater:
         actions: list[str],
         question_var: str = "{question}",
         pending_var: str = "{pending_tasks}",
-        in_progress_var: str = "{in_progress_tasks}",
+        current_var: str = "{current_task}",
         finished_var: str = "{finished_tasks}",
         include_tasks: bool = True,
         single_action: bool = False,
@@ -283,7 +283,7 @@ class FlowFormater:
             actions: List of action names to include (e.g., ["execute", "plan", "answer"])
             question_var: Variable name for question (default: "{question}")
             pending_var: Variable name for pending tasks (default: "{pending_tasks}")
-            in_progress_var: Variable name for in-progress tasks (default: "{in_progress_tasks}")
+            current_var: Variable name for current task (default: "{current_task}")
             finished_var: Variable name for finished tasks (default: "{finished_tasks}")
             include_tasks: Whether to include task sections (default: True)
             single_action: If True, simplify prompt for single action (no "Choose ONE action").
@@ -313,8 +313,8 @@ class FlowFormater:
                 "Finished tasks:",
                 finished_var,
                 "",
-                "In-progress tasks:",
-                in_progress_var,
+                "Current task:",
+                current_var,
                 "",
                 "Pending tasks:",
                 pending_var,
@@ -400,13 +400,21 @@ def state_rule(
 
 
 class FlowContext:
-    """Manages main agent history, task lists, and workflow state."""
+    """Manages main agent history, task lists, and workflow state.
+
+    Task lifecycle:
+        pending -> current (in_progress) -> finished
+
+    The current task is the single task being worked on by execute actions.
+    When execute completes successfully, the current task moves to finished,
+    and the first pending task becomes the new current task.
+    """
 
     def __init__(self, main_agent: ChatAgent):
         self.main_agent = main_agent
         # Task lists
         self.pending: List[str] = []
-        self.in_progress: List[str] = []
+        self._current: List[str] = []  # Current task (0 or 1 item)
         self.finished: List[str] = []
         # Tracking
         self.round: int = 0  # Always increases (iteration counter)
@@ -417,6 +425,15 @@ class FlowContext:
         self._step_to_round: Dict[int, int] = {}
 
     @property
+    def current(self) -> List[str]:
+        """The current task being executed (0 or 1 item)."""
+        return self._current
+
+    @current.setter
+    def current(self, value: List[str]) -> None:
+        self._current = value
+
+    @property
     def progress(self) -> int:
         """Number of finished tasks."""
         return len(self.finished)
@@ -424,7 +441,7 @@ class FlowContext:
     @property
     def total(self) -> int:
         """Total number of tasks."""
-        return len(self.pending) + len(self.in_progress) + len(self.finished)
+        return len(self.pending) + len(self._current) + len(self.finished)
 
     @property
     def state_results(self) -> List[StateResult]:
@@ -436,19 +453,13 @@ class FlowContext:
         """All actions in round order."""
         return [self._snapshots[r]["action"] for r in sorted(self._snapshots.keys())]
 
-    def prepare(self, action: str) -> None:
-        """Prepare state before action execution."""
-        if action == "execute":
-            if not self.in_progress and self.pending:
-                self.in_progress.append(self.pending.pop(0))
-
     def snapshot(self, action: str, result: StateResult) -> None:
         """Snapshot AFTER action execution. Records full state and increments round."""
         self._snapshots[self.round] = {
             "action": action,
             "result": result,
             "pending": list(self.pending),
-            "in_progress": list(self.in_progress),
+            "current": list(self._current),
             "finished": list(self.finished),
             "step": self.step,
         }
@@ -484,7 +495,12 @@ class FlowContext:
                 )
 
     def update_tasks(self, result: StateResult) -> None:
-        """Update task lists and step based on state result."""
+        """Update task lists and step based on state result.
+
+        For execute with success: current task moves to finished.
+        For plan: clears current and pending, sets new pending list.
+        After updates, promotes first pending to current if current is empty.
+        """
         if result.state == "rewind":
             # rewind_to is turn index (1-indexed from rewind agent)
             rewind_to_turn = result.kwargs.get("rewind_to_step", 0)
@@ -495,7 +511,7 @@ class FlowContext:
             if target_round is not None:
                 snapshot = self._snapshots.get(target_round, {})
                 self.pending = list(snapshot.get("pending", []))
-                self.in_progress = list(snapshot.get("in_progress", []))
+                self._current = list(snapshot.get("current", []))
                 self.finished = list(snapshot.get("finished", []))
                 self.step = snapshot.get("step", target_step)
                 # Clear step_to_round entries after current step
@@ -505,11 +521,16 @@ class FlowContext:
             self.step += 1
             if result.state == "execute":
                 status = result.kwargs.get("completion_status", "success")
-                if status == "success" and self.in_progress:
-                    self.finished.append(self.in_progress.pop(0))
+                if status == "success" and self._current:
+                    # Move current task to finished
+                    self.finished.append(self._current.pop(0))
             elif result.state == "plan":
-                self.in_progress = []
+                self._current = []
                 self.pending = result.tasks if result.tasks else []
+
+        # Promote first pending to current for next iteration
+        if not self._current and self.pending:
+            self._current.append(self.pending.pop(0))
 
 
 def do_execute(
@@ -645,7 +666,7 @@ def do_wide_execute(
 
     if len(worker_tools) == 1:
         # Single tool: just use regular execute
-        return do_execute(task, worker_model, worker_tools, tracker, step_idx, num_fewshot=2)
+        return do_execute(task, worker_model, worker_tools, tracker, step_idx, num_fewshot=1)
 
     # Execute each tool in parallel
     results: List[Tuple[str, str, List[Any]]] = []
@@ -706,7 +727,7 @@ def do_plan(
     data: dict,
     question: str,
     pending_tasks: List[str],
-    in_progress_tasks: List[str],
+    current_tasks: List[str],
     finished_tasks: List[str],
     main_agent: ChatAgent,
 ) -> StateResult:
@@ -717,7 +738,7 @@ def do_plan(
         data: Parsed decision data containing tasks.
         question: Research question.
         pending_tasks: Tasks not yet started.
-        in_progress_tasks: Tasks partially completed.
+        current_tasks: Tasks partially completed.
         finished_tasks: Tasks fully completed.
         main_agent: Main agent whose decision history is captured.
 
@@ -725,7 +746,7 @@ def do_plan(
         StateResult with conversation records and new tasks.
     """
     plan_prompt = FlowFormater.build_action_prompt(
-        ["plan"], question, pending_tasks, in_progress_tasks, finished_tasks, single_action=True
+        ["plan"], question, pending_tasks, current_tasks, finished_tasks, single_action=True
     )
     plans = FlowParser.parse_tasks(state_conversation[1]["content"])
     plan_str = " ".join([f"[{i+1}] {plan}" for i, plan in enumerate(plans)])
@@ -864,7 +885,7 @@ def main_decision(
     state: str,
     main_agent: ChatAgent,
     pending_tasks: List[str],
-    in_progress_tasks: List[str],
+    current_tasks: List[str],
     finished_tasks: List[str],
     question: str,
     state_rule_actions: Optional[List[str]] = None,
@@ -880,7 +901,7 @@ def main_decision(
         state: Current workflow state.
         main_agent: Main agent for decision making.
         pending_tasks: Tasks not yet started.
-        in_progress_tasks: Tasks partially completed.
+        current_tasks: Tasks partially completed.
         finished_tasks: Tasks fully completed.
         question: Research question.
         tracker: Interaction tracker.
@@ -892,7 +913,7 @@ def main_decision(
     state_sequence = state_results or (tracker.state_results if tracker is not None else None)
     available_actions = state_rule(state, state_sequence, state_rule_actions)
     prompt = FlowFormater.build_action_prompt(
-        available_actions, question, pending_tasks, in_progress_tasks, finished_tasks,
+        available_actions, question, pending_tasks, current_tasks, finished_tasks,
         single_action=len(available_actions) == 1
     )
     response = main_agent.step(prompt)
@@ -911,7 +932,7 @@ def focused_substep(
     action: str,
     question: str,
     pending_tasks: List[str],
-    in_progress_tasks: List[str],
+    current_tasks: List[str],
     finished_tasks: List[str],
     tracker: InteractionTracker = None,
 ) -> Tuple[dict, List[Dict[str, str]]]:
@@ -926,7 +947,7 @@ def focused_substep(
         action: The chosen action name.
         question: Research question.
         pending_tasks: Tasks not yet started.
-        in_progress_tasks: Tasks partially completed.
+        current_tasks: Tasks partially completed.
         finished_tasks: Tasks fully completed.
         tracker: Interaction tracker.
 
@@ -938,7 +959,7 @@ def focused_substep(
 
     # Build focused prompt with only the selected action
     prompt = FlowFormater.build_action_prompt(
-        [action], question, pending_tasks, in_progress_tasks, finished_tasks, single_action=True
+        [action], question, pending_tasks, current_tasks, finished_tasks, single_action=True
     )
     response = main_agent.step(prompt)
     record_interaction(tracker, main_agent.chat_history, llm_id=0)
@@ -961,7 +982,7 @@ def do_tree_research(
     think_model: BaseModelBackend = None,
     state_rule_actions: Optional[List[str]] = ["execute", "plan", "think", "rewind", "answer", "exam"],
     tracker: InteractionTracker = None,
-    tree_tracker: Any = None,
+    tree_tracker: TreeTracker = None,
     worker_tools: List[FunctionTool] = None,
     max_rounds: int = 10,
     show_status: bool = True,
@@ -1015,7 +1036,7 @@ def do_tree_research(
     for _ in range(max_rounds):
         # Master decision: determine next state
         next_state, data, conversation = main_decision(
-            state, main_agent, ctx.pending, ctx.in_progress, ctx.finished,
+            state, main_agent, ctx.pending, ctx.current, ctx.finished,
             question, state_rule_actions, tracker, ctx.state_results
         )
 
@@ -1023,7 +1044,7 @@ def do_tree_research(
         if focused and next_state in TREE_ACTIONS and TREE_ACTIONS[next_state].get("with_param", False):
             data, conversation = focused_substep(
                 main_agent, next_state, question,
-                ctx.pending, ctx.in_progress, ctx.finished, tracker
+                ctx.pending, ctx.current, ctx.finished, tracker
             )
 
         if tree_tracker is not None:
@@ -1038,27 +1059,24 @@ def do_tree_research(
             return data.get("answer", ""), tracker
 
         # Build status description
-        all_pending = ctx.in_progress + ctx.pending
-        status_map = {
-            "execute": [data.get("task", "")] + all_pending[1:],
-            "plan": ["Planning tasks"],
-            "think": ["Thinking about next steps"],
-            "rewind": ["Analyzing rewind point"],
-            "exam": [f"Examining step {data.get('step', 0)}"],
+        status_desc_map = {
+            "execute": data.get("task", "Executing task"),
+            "plan": "Planning tasks",
+            "think": "Thinking about next steps",
+            "rewind": "Analyzing rewind point",
+            "exam": f"Examining step {data.get('step', 0)}",
         }
-        status_tasks = status_map.get(next_state)
-        if status_tasks is None:
+        status_desc = status_desc_map.get(next_state)
+        if status_desc is None:
             break  # Unknown state
 
-        with logger.status(next_state, ctx.round, ctx.step, ctx.progress, ctx.total, status_tasks) as update_status:
-            ctx.prepare(next_state)
-
+        with logger.status(next_state, ctx.round, ctx.step, status_desc, ctx.finished, ctx.current, ctx.pending) as update_status:
             # Dispatch to state handler
             if next_state == "execute":
                 if tree_tracker is not None:
                     tree_tracker.register_step(ctx.step, ctx.round)
                 task = data["task"]
-                result = do_execute(task, worker_model, worker_tools, tracker, ctx.step, num_fewshot=2)
+                result = do_execute(task, worker_model, worker_tools, tracker, ctx.step, num_fewshot=0)
 
                 # Feedback evaluation for triplets
                 chat_history = result.kwargs.get("raw_chat_history", [])
@@ -1070,7 +1088,7 @@ def do_tree_research(
             elif next_state == "plan":
                 result = do_plan(
                     conversation, data, question,
-                    ctx.pending, ctx.in_progress, ctx.finished, main_agent
+                    ctx.pending, ctx.current, ctx.finished, main_agent
                 )
 
             elif next_state == "think":
@@ -1094,9 +1112,10 @@ def do_tree_research(
             # Snapshot AFTER action (records action, result, tasks, step)
             ctx.snapshot(next_state, result)
 
-            # Update status display
+            # Update status display with current task state
             tools_used = result.kwargs.get("tools_used")
-            update_status(result.feedback, tools_used=tools_used)
+            update_status(result.feedback, tools_used=tools_used,
+                          tasks=(ctx.finished, ctx.current, ctx.pending))
 
             # Record tools used for this round
             if tree_tracker is not None:
@@ -1110,10 +1129,10 @@ def do_tree_research(
         state = next_state
 
     # Fallback: force answer
-    all_tasks = ctx.finished + ctx.in_progress + ctx.pending
+    all_tasks = ctx.finished + ctx.current + ctx.pending
     if all_tasks:
         prompt = FlowFormater.build_action_prompt(
-            ["answer"], question, ctx.pending, ctx.in_progress, ctx.finished
+            ["answer"], question, ctx.pending, ctx.current, ctx.finished
         )
     else:
         prompt_template = FlowFormater.build_decision_prompt(["answer"], include_tasks=False, single_action=False)
