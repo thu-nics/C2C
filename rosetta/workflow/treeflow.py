@@ -159,6 +159,8 @@ class FlowParser:
             return "execute", {"task": cls.parse_task(text)}
         if action == "exam":
             return "exam", {"step": cls.parse_step(text)}
+        if action == "parallel_execute":
+            return "parallel_execute", {"tasks": cls.parse_tasks(text)}
         return "unknown", {}
 
 
@@ -381,21 +383,39 @@ def state_rule(
         # Always think or plan first
         filtered = [action for action in actions if action in ("plan", "think")]
         return filtered if filtered else list(actions)
+    else:
+        pass
+        # If not initial, don't think
+        # _current_state = [action for action in actions if action not in ("think")]
+        # actions = _current_state
+
     if not state_sequence or not any(result.state == "plan" for result in state_sequence):
-        # If no plan, don't execute
-        actions = [action for action in actions if action != "execute"]
+        # If no plan, don't execute or parallel_execute
+        actions = [action for action in actions if action not in ("execute", "parallel_execute")]
     if state_sequence:
         last_stateResult = state_sequence[-1]
-        # if (last_stateResult.state == "execute") and last_stateResult.kwargs["num_tool_calls"] > 10:
-        #     filtered = [action for action in actions if action in ("rewind")]
-        #     return filtered if filtered else list(actions)
         if last_stateResult.state == "rewind":
             # If rewind, must plan again
             filtered = [action for action in actions if action in ("plan")]
             return filtered if filtered else list(actions)
-        # if last_stateResult.state == "think":
+
+        # if last_stateResult.state == "execute":
+        #     # If execute, must plan again
         #     filtered = [action for action in actions if action in ("plan")]
         #     return filtered if filtered else list(actions)
+
+        # Count consecutive execute failures (fail/partial) without success
+        consecutive_failures = 0
+        for result in reversed(state_sequence):
+            if result.state in ("execute", "parallel_execute"):
+                status = result.kwargs.get("completion_status", "success")
+                if status in ("fail", "partial"):
+                    consecutive_failures += 1
+                else:  # success resets the count
+                    break
+        # if consecutive_failures >= 4 and "rewind" in actions:
+        #     return ["rewind"]
+
     return actions
 
 
@@ -498,6 +518,7 @@ class FlowContext:
         """Update task lists and step based on state result.
 
         For execute with success: current task moves to finished.
+        For parallel_execute: all executed tasks move to finished based on status.
         For plan: clears current and pending, sets new pending list.
         After updates, promotes first pending to current if current is empty.
         """
@@ -524,6 +545,21 @@ class FlowContext:
                 if status == "success" and self._current:
                     # Move current task to finished
                     self.finished.append(self._current.pop(0))
+            elif result.state == "parallel_execute":
+                # For parallel_execute, mark current task as finished if overall success
+                # The parallel tasks themselves are not in the task list - they were inline
+                status = result.kwargs.get("completion_status", "success")
+                if status == "success" and self._current:
+                    self.finished.append(self._current.pop(0))
+                # Add completed parallel tasks as finished items for tracking
+                task_count = result.kwargs.get("task_count", 0)
+                if task_count > 0:
+                    # Extract task descriptions from records (every other starting from 0)
+                    for i in range(0, len(result.records), 2):
+                        if i < len(result.records):
+                            task_content = result.records[i].get("content", "")
+                            if task_content and task_content not in self.finished:
+                                self.finished.append(f"[parallel] {task_content[:50]}...")
             elif result.state == "plan":
                 self._current = []
                 self.pending = result.tasks if result.tasks else []
@@ -625,6 +661,88 @@ def do_execute(
     )
 
 
+def do_parallel_execute(
+    tasks: List[str],
+    worker_model: BaseModelBackend,
+    worker_tools: List[FunctionTool],
+    tracker: InteractionTracker = None,
+    step_idx: int = 0,
+    max_iteration: Optional[int] = None,
+    num_fewshot: int = 0,
+) -> StateResult:
+    """Execute multiple tasks in parallel using worker agents.
+
+    Args:
+        tasks: List of subtasks to execute in parallel.
+        worker_model: Model for worker agents.
+        worker_tools: Tools available to workers.
+        tracker: Interaction tracker.
+        step_idx: Current step index.
+        max_iteration: Maximum number of iterations per task.
+        num_fewshot: Number of few-shot examples to add (default: 0).
+
+    Returns:
+        StateResult with feedback, multi-round conversation records, and aggregated results.
+    """
+    # Execute all tasks in parallel, each calling do_execute
+    results: List[Tuple[int, StateResult]] = []
+    with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
+        futures = {
+            executor.submit(
+                do_execute, task, worker_model, worker_tools,
+                tracker, step_idx + idx, max_iteration, num_fewshot
+            ): idx
+            for idx, task in enumerate(tasks)
+        }
+        for future in as_completed(futures):
+            idx = futures[future]
+            results.append((idx, future.result()))
+
+    # Sort by original task index to maintain order
+    results.sort(key=lambda x: x[0])
+
+    # Aggregate results into multi-round conversation records
+    records = []
+    all_chat_histories = []
+    all_tools_used = []
+    total_tool_calls = 0
+    feedbacks = []
+    completion_statuses = []
+
+    for task_idx, result in results:
+        records.extend(result.records)
+        all_chat_histories.append(result.chat_history)
+        all_tools_used.extend(result.kwargs.get("tools_used", []))
+        total_tool_calls += result.kwargs.get("num_tool_calls", 0)
+        status = result.kwargs.get("completion_status", "success")
+        completion_statuses.append(status)
+        feedbacks.append(f"[Task {task_idx + 1}] {result.feedback}")
+
+    # Determine overall status
+    if all(s == "success" for s in completion_statuses):
+        overall_status = "success"
+    elif all(s == "fail" for s in completion_statuses):
+        overall_status = "fail"
+    else:
+        overall_status = "partial"
+
+    feedback = f"| Parallel {overall_status.capitalize()} | {len(tasks)} tasks, {total_tool_calls} tool calls\n" + "\n".join(feedbacks)
+
+    return StateResult(
+        feedback=feedback,
+        records=records,
+        state="parallel_execute",
+        chat_history=all_chat_histories[0] if all_chat_histories else None,
+        kwargs={
+            "num_tool_calls": total_tool_calls,
+            "completion_status": overall_status,
+            "tools_used": list(dict.fromkeys(all_tools_used)),
+            "all_chat_histories": all_chat_histories,
+            "task_count": len(tasks),
+        },
+    )
+
+
 def do_wide_execute(
     task: str,
     worker_model: BaseModelBackend,
@@ -661,6 +779,7 @@ def do_wide_execute(
             tools=[tool]
         )
         response = worker_agent.step(task)
+        response.msg.content # call to ensure lazy consumption of the response
         chat_history = context_records_to_memory_records(worker_agent.memory.retrieve())
         return tool.func.__name__, response.msg.content, chat_history
 
@@ -778,6 +897,7 @@ def do_think(
     think_agent.memory.write_records(forward_records)
 
     response = think_agent.step(THINK_PROMPT.format(question=question))
+    response.msg.content # call to ensure lazy consumption of the response
     record_interaction(tracker, think_agent.chat_history, llm_id=-2)
 
     thought = FlowParser.parse_thought(response.msg.content) or response.msg.content
@@ -860,6 +980,7 @@ def do_exam(
         subagent_history=subagent_history,
     )
     response = exam_agent.step(prompt)
+    response.msg.content # call to ensure lazy consumption of the response
     record_interaction(tracker, exam_agent.chat_history, llm_id=-1)  # Use -1 for exam agent
 
     verdict, reason, correction = FlowParser.parse_exam_result(response.msg.content)
@@ -917,6 +1038,7 @@ def main_decision(
         single_action=len(available_actions) == 1
     )
     response = main_agent.step(prompt)
+    response.msg.content # call to ensure lazy consumption of the response
     record_interaction(tracker, main_agent.chat_history, llm_id=0)
 
     next_state, data = FlowParser.parse_decision(response.msg.content)
@@ -962,6 +1084,7 @@ def focused_substep(
         [action], question, pending_tasks, current_tasks, finished_tasks, single_action=True
     )
     response = main_agent.step(prompt)
+    response.msg.content # call to ensure lazy consumption of the response
     record_interaction(tracker, main_agent.chat_history, llm_id=0)
 
     # Parse the focused response
@@ -980,7 +1103,7 @@ def do_tree_research(
     rewind_model: BaseModelBackend = None,
     exam_model: BaseModelBackend = None,
     think_model: BaseModelBackend = None,
-    state_rule_actions: Optional[List[str]] = ["execute", "plan", "think", "rewind", "answer", "exam"],
+    state_rule_actions: Optional[List[str]] = ["execute", "parallel_execute", "plan", "think", "rewind", "answer", "exam"],
     tracker: InteractionTracker = None,
     tree_tracker: TreeTracker = None,
     worker_tools: List[FunctionTool] = None,
@@ -1028,7 +1151,7 @@ def do_tree_research(
         think_model = worker_model
 
     # Create feedback agent
-    feedback_agent = FeedbackAgent(model=worker_model)
+    # feedback_agent = FeedbackAgent(model=worker_model)
 
     ctx = FlowContext(main_agent)
     state = "initial"
@@ -1061,6 +1184,7 @@ def do_tree_research(
         # Build status description
         status_desc_map = {
             "execute": data.get("task", "Executing task"),
+            "parallel_execute": f"Executing {len(data.get('tasks', []))} tasks in parallel",
             "plan": "Planning tasks",
             "think": "Thinking about next steps",
             "rewind": "Analyzing rewind point",
@@ -1079,11 +1203,19 @@ def do_tree_research(
                 result = do_execute(task, worker_model, worker_tools, tracker, ctx.step, num_fewshot=0)
 
                 # Feedback evaluation for triplets
-                chat_history = result.kwargs.get("raw_chat_history", [])
-                triplets = FeedbackAgent.extract_triplets(chat_history)
-                if triplets:
-                    scores = feedback_agent.evaluate(triplets, task, ctx.step)
-                    feedback_agent.store(scores)
+                # chat_history = result.kwargs.get("raw_chat_history", [])
+                # triplets = FeedbackAgent.extract_triplets(chat_history)
+                # if triplets:
+                #     scores = feedback_agent.evaluate(triplets, task, ctx.step)
+                #     feedback_agent.store(scores)
+
+            elif next_state == "parallel_execute":
+                if tree_tracker is not None:
+                    tree_tracker.register_step(ctx.step, ctx.round)
+                tasks = data.get("tasks", [])
+                result = do_parallel_execute(
+                    tasks, worker_model, worker_tools, tracker, ctx.step, num_fewshot=0
+                )
 
             elif next_state == "plan":
                 result = do_plan(
@@ -1138,6 +1270,7 @@ def do_tree_research(
         prompt_template = FlowFormater.build_decision_prompt(["answer"], include_tasks=False, single_action=False)
         prompt = prompt_template.format(question=question)
     response = main_agent.step(prompt)
+    response.msg.content # call to ensure lazy consumption of the response
     record_interaction(tracker, main_agent.chat_history, llm_id=0)
     answer = FlowParser.parse_answer(response.msg.content)
 

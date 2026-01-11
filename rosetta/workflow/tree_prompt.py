@@ -63,10 +63,10 @@ TREE_ACTIONS = {
         "with_param": False,
     },
     "rewind": {
-        "description": "Rewind - backtrack when similar tasks fail multiple times",
+        "description": "Rewind - backtrack when similar tasks fail repeatedly",
         "format": """<action>rewind</action>""",
         "guidelines": [
-            "[rewind] Use when similar searches fail repeatedly (same query variations, same dead ends).",
+            "[rewind] Use when similar tasks fail repeatedly (similar query variations, similar dead ends).",
             "[rewind] Use when exploring the wrong entity or topic.",
             "[rewind] After rewinding, switch to a different approach.",
         ],
@@ -80,6 +80,20 @@ TREE_ACTIONS = {
             "[answer] Use this action only when you have enough verified information to respond conclusively.",
             "[answer] Keep the justification to 1–2 short sentences.",
             "[answer] Put the final answer span in the \"answer\" field and the brief rationale in \"justification\".",
+        ],
+        "with_param": True,
+    },
+    "parallel_execute": {
+        "description": "Parallel Execute - work on multiple independent tasks simultaneously",
+        "format": """<action>parallel_execute</action>
+<tasks>
+<task>Self-contained subtask 1 with necessary context</task>
+<task>Self-contained subtask 2 with necessary context</task>
+</tasks>""",
+        "guidelines": [
+            "[parallel_execute] Use when multiple tasks are independent and can be executed concurrently.",
+            "[parallel_execute] Each <task> must be self-contained with all context needed; subagents cannot see prior conversation.",
+            "[parallel_execute] Results will be collected and presented as multi-round conversation records.",
         ],
         "with_param": True,
     },
