@@ -73,9 +73,9 @@ pip install -e ".[training,evaluation]"
 
 ## How to
 
-### Use Hugging Face weights
+### Use existing C2C Fusers
 
-Minimal example to load published C2C weights from the Hugging Face collection and run the provided inference script:
+Minimal example to load published C2C Fuser weights from the Hugging Face collection and run the provided inference script. See the [full list of available fuser pairs](#supported-model-pairs). 
 
 ```python
 import torch
@@ -116,7 +116,7 @@ with torch.no_grad():
     print(f"C2C output text: {output_text}")
 ```
 
-### Run an example
+### Run chat example
 
 We provide an interactive chat example to demonstrate cache-to-cache communication with pre-trained projectors in `script/playground/live_chat_example.py`.
 
@@ -128,9 +128,12 @@ python script/playground/live_chat_example.py --checkpoint_dir path/to/checkpoin
 python script/playground/live_chat_example.py --checkpoint_dir path/to/ckpt1 path/to/ckpt2
 ```
 
-### Apply Cache-to-Cache
+### Apply C2C to any LLMs
 
-You can apply C2C to your own models with a few lines of code. Here is an example:
+You can apply C2C to your own LLMs with a few lines of code. We provide a universal `RosettaModel` wrapper.
+
+<details>
+<summary><b>Example code</b></summary>
 
 ```python
 import torch
@@ -179,7 +182,9 @@ outputs = c2c_model.generate(
 )
 ```
 
-### Train C2C Projectors
+</details>
+
+### Train C2C Fusers
 
 Prepare a training configuration file in `recipe/train_recipe/`. Specify the base model, teacher model, projector type and parameters, training hyperparameters, dataset, and output directory. See `recipe/train_recipe/C2C_0.6+0.5.json` for a complete example.
 
@@ -208,6 +213,11 @@ python script/evaluation/unified_evaluator.py --config recipe/eval_recipe/unifie
 ```
 
 ## Understanding the Code
+
+Details on code structure and how to add custom projectors/datasets/benchmarks.
+
+<details>
+<summary><b>Expand to see</b></summary>
 
 ### Code Structure
 
@@ -273,20 +283,73 @@ Use in configuration: `{"data": {"type": "MyDataset"}}`
 
 Add evaluation logic in `script/evaluation/` following the pattern in `unified_evaluator.py`. The evaluator loads models, runs inference, and computes metrics for your benchmark dataset.
 
+</details>
+
 ## Supported Model Pairs
 
-### Qwen Family
+The following pre-trained C2C projectors are available on [🤗 Hugging Face](https://huggingface.co/nics-efc/C2C_Fuser/tree/main):
 
-* Qwen3-0.6B + Qwen2.5-0.5B-Instruct
-* Qwen3-0.6B + Llama-3.2-1B-Instruct
-* Qwen3-0.6B + Qwen3-4B-Base
+| Receiver Model | Sharer Model | Checkpoint |
+|:---------------|:-------------|:-----------|
+| Qwen3-0.6B | Qwen2.5-0.5B-Instruct | [🔗 Link](https://huggingface.co/nics-efc/C2C_Fuser/tree/main/qwen3_0.6b+qwen2.5_0.5b_Fuser) |
+| Qwen3-0.6B | Llama-3.2-1B-Instruct | [🔗 Link](https://huggingface.co/nics-efc/C2C_Fuser/tree/main/qwen3_0.6b+llam3.2_1b_Fuser) |
+| Qwen3-0.6B | Qwen2.5-Math-1.5B | [🔗 Link](https://huggingface.co/nics-efc/C2C_Fuser/tree/main/qwen3_0.6b+qwen2.5_1.5b_math_Fuser) |
+| Qwen3-0.6B | Qwen3-4B | [🔗 Link](https://huggingface.co/nics-efc/C2C_Fuser/tree/main/qwen3_0.6b+qwen3_4b_Fuser) |
+| Qwen3-0.6B | Qwen3-4B-Base | [🔗 Link](https://huggingface.co/nics-efc/C2C_Fuser/tree/main/qwen3_0.6b+qwen3_4b_base_Fuser) |
+| Qwen3-1.7B | Qwen2.5-1.5B-Instruct | [🔗 Link](https://huggingface.co/nics-efc/C2C_Fuser/tree/main/qwen3_1.7b+qwen2.5_1.5b_Fuser) |
+| Qwen3-8B | Qwen2.5-7B-Instruct | [🔗 Link](https://huggingface.co/nics-efc/C2C_Fuser/tree/main/qwen3_8b+qwen2.5_7b_Fuser) |
 
-### Other Configurations
+### Custom Model Pairs
 
-C2C supports arbitrary model pairs. The framework automatically handles:
+C2C supports arbitrary model pairs beyond those listed above. The framework automatically handles:
 - Different hidden dimensions
 - Different number of layers
 - Different attention head configurations
 - Different tokenizers
 
-To use custom model pairs, simply specify them in your configurations.
+To use custom model pairs, simply specify them in your training/evaluation configurations.
+
+## Related Projects
+
+Explore more efficient LLM projects from us:
+
+<table style="border: none; border-collapse: collapse;" align="center">
+<tr>
+<td align="center" valign="top" width="25%" style="border: none; border-right: 1px solid rgba(128, 128, 128, 0.3); padding: 10px; min-width: 50px;">
+<div style="height: 5em; display: flex; align-items: center; justify-content: center;">
+<a href="https://github.com/thu-nics/R2R">
+<img src="https://raw.githubusercontent.com/thu-nics/R2R/main/resource/logo.png" style="max-height: 5em; max-width: 100%; height: auto; width: auto;" />
+</a>
+</div>
+<a href="https://github.com/thu-nics/R2R"><b>R2R</b></a>
+<br/><sub>Token-level routing for reasoning LLMs</sub>
+</td>
+<td align="center" valign="top" width="25%" style="border: none; border-right: 1px solid rgba(128, 128, 128, 0.3); padding: 10px; min-width: 50px;">
+<div style="height: 5em; display: flex; align-items: center; justify-content: center;">
+<a href="https://github.com/thu-nics/TaH">
+<img src="https://raw.githubusercontent.com/thu-nics/TaH/main/resource/logo.png" style="max-height: 5em; max-width: 100%; height: auto; width: auto;" />
+</a>
+</div>
+<a href="https://github.com/thu-nics/TaH"><b>TaH</b></a>
+<br/><sub>Selective latent thinking for reasoning LLMs</sub>
+</td>
+<td align="center" valign="top" width="25%" style="border: none; border-right: 1px solid rgba(128, 128, 128, 0.3); padding: 10px; min-width: 50px;">
+<div style="height: 5em; display: flex; align-items: center; justify-content: center;">
+<a href="https://github.com/thu-nics/FrameFusion">
+<img src="https://raw.githubusercontent.com/thu-nics/FrameFusion/main/example/image/logo.png" style="max-height: 5em; max-width: 100%; height: auto; width: auto;" />
+</a>
+</div>
+<a href="https://github.com/thu-nics/FrameFusion"><b>FrF</b></a>
+<br/><sub>Efficient video token reduction for LVLMs</sub>
+</td>
+<td align="center" valign="top" width="25%" style="border: none; padding: 10px; min-width: 50px;">
+<div style="height: 5em; display: flex; align-items: center; justify-content: center;">
+<a href="https://github.com/thu-nics/MoA">
+<img src="https://raw.githubusercontent.com/thu-nics/MoA/master/resource/logo.png" style="max-height: 5em; max-width: 100%; height: auto; width: auto;" />
+</a>
+</div>
+<a href="https://github.com/thu-nics/MoA"><b>MoA</b></a>
+<br/><sub>Mixture of sparse attention for LLMs</sub>
+</td>
+</tr>
+</table>
