@@ -10,7 +10,6 @@ from camel.types import OpenAIBackendRole, RoleType, ModelPlatformType, ModelTyp
 from camel.models import ModelFactory
 from camel.configs import ChatGPTConfig
 
-
 def setup_env():
     """Setup environment variables."""
     load_dotenv(find_dotenv())
@@ -85,6 +84,19 @@ def create_model(
             model_config_dict=config.as_dict(),
             api_key=api_key or os.getenv("GEMINI_API_KEY"),
             url="https://generativelanguage.googleapis.com/v1beta/openai/",
+        )
+    elif provider == "fireworks":
+        model_type = model_type or "accounts/fireworks/models/qwen3-235b-a22b-instruct-2507"
+        config = ChatGPTConfig(
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+        return ModelFactory.create(
+            model_platform=ModelPlatformType.OPENAI_COMPATIBLE_MODEL,
+            model_type=model_type,
+            model_config_dict=config.as_dict(),
+            api_key=api_key or os.getenv("FIREWORKS_API_KEY"),
+            url="https://api.fireworks.ai/inference/v1",
         )
     else:
         raise ValueError(
@@ -276,3 +288,23 @@ def memoryRecords_to_messages(
         records: List of MemoryRecord objects.
     """
     return [record.to_openai_message() for record in records]
+
+def add_tool_requests_to_chat_history(
+    chat_history: List[dict],
+    tool_request,
+) -> List[dict]:
+    """Add tool requests to chat history."""
+    last_msg = chat_history[-1]
+    if last_msg.get("role") == "assistant":
+        # Format tool_calls according to what record_interaction expects
+        last_msg["tool_calls"] = [
+            {
+                "id": tool_request.tool_call_id,
+                "type": "function",
+                "function": {
+                    "name": tool_request.tool_name,
+                    "arguments": tool_request.args or {},
+                },
+            }
+        ]
+    return chat_history

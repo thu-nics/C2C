@@ -128,7 +128,7 @@ def run_research(
     mode: str,
     *,
     question: str,
-    main_agent: "ChatAgent",
+    main_model: "BaseModelBackend",
     tracker: Optional["InteractionTracker"] = None,
     search_model: Optional["BaseModelBackend"] = None,
     think_model: Optional["BaseModelBackend"] = None,
@@ -142,10 +142,20 @@ def run_research(
     tree_tracker: Optional[object] = None,
     max_rounds: int = 10,
     state_rule_actions: Optional[List[str]] = None,
+    main_agent_tools: Optional[List["FunctionTool"]] = None,
+    step_timeout: Optional[float] = None,
 ) -> Tuple[str, Optional["InteractionTracker"]]:
     """Dispatch to the requested research workflow."""
     mode = mode.lower()
     if mode == "single":
+        agent_kwargs = {
+            "system_message": "You are a helpful assistant.",
+            "model": main_model,
+            "tools": main_agent_tools,
+        }
+        if step_timeout is not None:
+            agent_kwargs["step_timeout"] = step_timeout
+        main_agent = ChatAgent(**agent_kwargs)
         return single_research(
             question=question,
             main_agent=main_agent,
@@ -157,6 +167,13 @@ def run_research(
             raise ValueError("search_model is required for mode='oneflow'")
         from rosetta.workflow.oneflow import do_research
 
+        agent_kwargs = {
+            "system_message": "You are a helpful assistant.",
+            "model": main_model,
+        }
+        if step_timeout is not None:
+            agent_kwargs["step_timeout"] = step_timeout
+        main_agent = ChatAgent(**agent_kwargs)
         return do_research(
             question=question,
             main_agent=main_agent,
@@ -167,13 +184,11 @@ def run_research(
             show_status=show_status,
         )
     if mode == "tree":
-        if worker_model is None:
-            raise ValueError("worker_model is required for mode='tree'")
         from rosetta.workflow.treeflow import do_tree_research
 
         return do_tree_research(
             question=question,
-            main_agent=main_agent,
+            main_model=main_model,
             worker_model=worker_model,
             rewind_model=rewind_model,
             exam_model=exam_model,

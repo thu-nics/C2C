@@ -1,20 +1,35 @@
 base:
   subset: distractor
   split: validation
-  limit: 100
+  limit: 5
   max_rounds: 20
   output_format: json
-  model_url: http://localhost:30000/v1
-  model_provider: local
+  # model_url: http://localhost:30000/v1
+  # model_provider: local
+  model_provider: fireworks
+  judge_model_provider: fireworks
   tokenizer: Qwen/Qwen3-32B
-  tools:
-    - search_engine
-  num_workers: 25
+  num_workers: 5
 
 runs:
+  # - name: tree
+  #   mode: tree
+  #   tools:
+  #     - search_engine
+  #   dataset: hotpotqa
+  #   output: local/evaluation/qwen3_235b_a22b_instruct_2507/tree_EPA/hotpotqa.json
+  #   state_rule:
+  #     - execute
+  #     - plan
+  #     - answer
+
   - name: tree
     mode: tree
-    output: local/evaluation/localSearch/tree_EPA_fewshot/hotpotqa.json
+    tools:
+      - search
+      - get_document
+    dataset: browsecomp
+    output: local/evaluation/qwen3_235b_a22b_instruct_2507/tree_EPA/browsecomp.json
     state_rule:
       - execute
       - plan

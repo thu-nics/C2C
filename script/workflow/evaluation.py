@@ -1,7 +1,9 @@
 """
-Evaluate subagent research on HotpotQA validation questions.
+Evaluate subagent research on HotpotQA or BrowseComp questions.
 
-Dataset: https://huggingface.co/datasets/hotpotqa/hotpot_qa
+Datasets:
+- HotpotQA: https://huggingface.co/datasets/hotpotqa/hotpot_qa
+- BrowseComp: local/data/BrowseCompPlus/data/browsecomp_qa_pairs.jsonl
 """
 
 from __future__ import annotations
@@ -21,10 +23,10 @@ from rich.progress import Progress, BarColumn, TextColumn, TimeElapsedColumn
 from rich.console import Console
 from rich.table import Table
 
-from camel.agents import ChatAgent
 from camel.toolkits import FunctionTool, SearchToolkit
 
 from rosetta.workflow.retriever import search_engine
+from rosetta.workflow.browse_searcher import search, get_document, configure_search
 from rosetta.workflow.selector import ContextSelector
 from rosetta.workflow.track import InteractionTracker, TreeTracker
 from rosetta.workflow.evaluation import (
@@ -40,7 +42,7 @@ from rosetta.workflow.camel_utils import create_model, setup_env
 @dataclass
 class EvalRecord:
     idx: int
-    hotpot_id: str
+    example_id: str
     question: str
     gold_answer: str
     pred_answer: str
@@ -55,6 +57,8 @@ class EvalRecord:
 
 @dataclass
 class EvalConfig:
+    dataset: str  # Dataset: hotpotqa, browsecomp
+    data_path: Optional[str]  # Path to data file (for browsecomp)
     subset: str
     split: str
     limit: int
@@ -142,7 +146,7 @@ def evaluate_single(
     tools: list[FunctionTool],
 ) -> EvalRecord:
     """Evaluate a single example."""
-    hotpot_id = str(ex["id"])
+    example_id = str(ex["id"])
     question = ex["question"]
     gold = ex["answer"]
 
@@ -150,15 +154,6 @@ def evaluate_single(
     use_tree = config.mode == "tree"
 
     tracker = InteractionTracker(tokenizer=tokenizer)
-    agent_tools = tools if use_single else None
-    agent_kwargs = {
-        "system_message": "You are a helpful assistant.",
-        "model": model,
-        "tools": agent_tools,
-    }
-    if config.step_timeout is not None:
-        agent_kwargs["step_timeout"] = config.step_timeout
-    main_agent = ChatAgent(**agent_kwargs)
     tree_tracker = TreeTracker() if use_tree else None
     context_plan = create_context_plan(config, use_single, use_tree)
 
@@ -173,7 +168,7 @@ def evaluate_single(
         pred_raw, tracker = run_research(
             mode=config.mode,
             question=question,
-            main_agent=main_agent,
+            main_model=model,
             search_model=search_model if not use_single else None,
             think_model=think_model if not use_single else None,
             tracker=tracker,
@@ -187,6 +182,8 @@ def evaluate_single(
             worker_tools=tools if use_tree else None,
             tree_tracker=tree_tracker,
             state_rule_actions=config.state_rule if use_tree else None,
+            main_agent_tools=tools if use_single else None,
+            step_timeout=config.step_timeout,
         )
         if use_tree and tracker is not None:
             state_sequence = tracker.state_sequence
@@ -212,7 +209,7 @@ def evaluate_single(
 
     return EvalRecord(
         idx=idx,
-        hotpot_id=hotpot_id,
+        example_id=example_id,
         question=question,
         gold_answer=gold,
         pred_answer=pred,
@@ -235,6 +232,16 @@ def worker_process(
 ) -> None:
     """Worker process that evaluates a chunk of examples."""
     setup_env()
+
+    # Configure BrowseComp search if needed (must be done in worker process)
+    if "search" in config.tools or "get_document" in config.tools:
+        configure_search(
+            index_path="local/data/BrowseCompPlus/indexes/qwen3-embedding-8b/corpus.*.pkl",
+            dataset_name="Tevatron/browsecomp-plus-corpus",
+            sglang_url="http://localhost:30001",
+            sglang_model="Qwen/Qwen3-Embedding-8B",
+            task_prefix="Query: ",
+        )
 
     # Create main model with custom chat_template_kwargs for thinking mode
     main_chat_template_kwargs = {"enable_thinking": config.enable_thinking} if config.model_provider == "local" else None
@@ -261,6 +268,11 @@ def worker_process(
 
     tokenizer = AutoTokenizer.from_pretrained(config.tokenizer)
     tools = [FunctionTool(func) for func in tool_funcs]
+    # Add BrowseComp tools after configuration
+    if "search" in config.tools:
+        tools.append(FunctionTool(search))
+    if "get_document" in config.tools:
+        tools.append(FunctionTool(get_document))
     output_file = process_dir / f"worker_{worker_id}.jsonl"
 
     with output_file.open("w", encoding="utf-8") as f:
@@ -312,7 +324,7 @@ def aggregate_results(process_dir: Path, output_path: Path, output_format: str) 
     return total, correct
 
 
-JUDGE_FIELDS = ["idx", "hotpot_id", "question", "gold_answer", "pred_answer",
+JUDGE_FIELDS = ["idx", "example_id", "question", "gold_answer", "pred_answer",
                 "correct_em", "correct_llm", "judge_confidence", "judge_reason", "error_category"]
 
 
@@ -346,6 +358,7 @@ def run_llm_judge(jsonl_path: Path, config: EvalConfig, max_workers: int = 32) -
     records = read_jsonl(jsonl_path)
 
     # Create judge model (local uses thinking by default)
+    setup_env()
     judge_model = create_model(
         provider=config.judge_model_provider,
         model_type=config.judge_model_type or config.model_type,
@@ -399,7 +412,7 @@ def write_output_files(jsonl_path: Path, output_path: Path, output_format: str) 
 
     # Write CSV
     csv_path = output_path.with_suffix(".csv")
-    csv_fields = ["idx", "hotpot_id", "question", "gold_answer", "pred_answer", "pred_raw",
+    csv_fields = ["idx", "example_id", "question", "gold_answer", "pred_answer", "pred_raw",
                   "correct_em", "correct_llm", "judge_confidence", "judge_reason",
                   "error_category", "tools_used", "state_sequence", "seconds", "error"]
 
@@ -444,6 +457,46 @@ def _jsonl_to_json_array(jsonl_path: Path, json_path: Path) -> None:
         fout.write("\n]\n")
 
 
+def load_dataset_examples(config: EvalConfig) -> list[dict]:
+    """Load examples from HotpotQA or BrowseComp dataset."""
+    if config.dataset == "hotpotqa":
+        split = config.split
+        if config.limit is not None and config.limit > 0:
+            split = f"{split}[:{config.limit}]"
+        ds = load_dataset("hotpotqa/hotpot_qa", config.subset, split=split)
+        examples = []
+        for idx, ex in enumerate(ds):
+            ex_dict = dict(ex)
+            ex_dict["_idx"] = idx
+            examples.append(ex_dict)
+        return examples
+    elif config.dataset == "browsecomp":
+        if config.data_path is None:
+            config.data_path = "local/data/BrowseCompPlus/data/browsecomp_qa_pairs.jsonl"
+        data_path = Path(config.data_path)
+        if not data_path.exists():
+            raise FileNotFoundError(f"BrowseComp data file not found: {data_path}")
+        examples = []
+        with data_path.open("r", encoding="utf-8") as f:
+            for idx, line in enumerate(f):
+                if config.limit is not None and config.limit > 0 and idx >= config.limit:
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ex = json.loads(line)
+                    # Map browsecomp fields to common format
+                    ex["question"] = ex.pop("query")
+                    ex["_idx"] = idx
+                    examples.append(ex)
+                except json.JSONDecodeError:
+                    continue
+        return examples
+    else:
+        raise ValueError(f"Unknown dataset: {config.dataset}")
+
+
 def _print_error_table(category_counts: dict[str, list]) -> None:
     """Print error category statistics with rich table."""
     console = Console()
@@ -470,8 +523,12 @@ def _print_error_table(category_counts: dict[str, list]) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--subset", default="distractor", choices=["distractor", "fullwiki"])
-    parser.add_argument("--split", default="validation")
+    parser.add_argument("--dataset", default="hotpotqa", choices=["hotpotqa", "browsecomp"],
+                        help="Dataset to evaluate: hotpotqa or browsecomp")
+    parser.add_argument("--data-path", type=str, default="local/data/BrowseCompPlus/data/browsecomp_qa_pairs.jsonl",
+                        help="Path to data file (for browsecomp, default: local/data/BrowseCompPlus/data/browsecomp_qa_pairs.jsonl)")
+    parser.add_argument("--subset", default="distractor", choices=["distractor", "fullwiki"], help="HotpotQA subset (only for hotpotqa dataset)")
+    parser.add_argument("--split", default="validation", help="HotpotQA split (only for hotpotqa dataset)")
     parser.add_argument("--limit", type=int, default=5)
     parser.add_argument("--max-rounds", type=int, default=20)
     parser.add_argument("--output", default="local/evaluation/direct/hotpotqa.jsonl")
@@ -480,7 +537,7 @@ def main() -> None:
     parser.add_argument("--model-url", default="http://localhost:30000/v1")
     parser.add_argument("--model-type", default=None,
                         help="Model type (default: local='local', openai='gpt-4o-mini', gemini='gemini-3-flash-preview')")
-    parser.add_argument("--model-provider", default="local", choices=["local", "openai", "gemini"],
+    parser.add_argument("--model-provider", default="local", choices=["local", "openai", "gemini", "fireworks"],
                         help="Model provider: local (OpenAI-compatible), openai, or gemini")
     parser.add_argument("--tokenizer", default="Qwen/Qwen3-32B")
     parser.add_argument("--mode", default="oneflow", choices=["oneflow", "single", "tree"])
@@ -492,19 +549,19 @@ def main() -> None:
         "--tools",
         nargs="+",
         default=["search_engine"],
-        choices=["search_engine", "search_wiki", "search_google", "search_tavily"],
-        help="Tools to enable (default: search_engine)",
+        choices=["search_engine", "search_wiki", "search_google", "search_tavily", "search", "get_document"],
+        help="Tools to enable (default: search_engine). Use 'search' and 'get_document' for BrowseComp.",
     )
     parser.add_argument("--num-workers", type=int, default=4, help="Number of parallel workers")
     parser.add_argument(
         "--state-rule",
         nargs="+",
-        default=["execute", "plan", "rewind", "answer", "think", "exam"],
+        default=["execute", "plan", "rewind", "answer", "think"],
         help="Allowed tree actions (default: execute plan rewind answer)",
     )
     parser.add_argument("--judge-only", action="store_true",
                         help="Only run LLM judge on existing data (use with --output to specify input file)")
-    parser.add_argument("--judge-model-provider", type=str, default="local", choices=["local", "openai", "gemini"],
+    parser.add_argument("--judge-model-provider", type=str, default="local", choices=["local", "openai", "gemini", "fireworks"],
                         help="Model provider for LLM judge (default: local)")
     parser.add_argument("--judge-api-url", type=str, default=None, help="API URL for LLM judge (defaults to model-url)")
     parser.add_argument("--judge-model-type", type=str, default=None, help="Model type for LLM judge")
@@ -513,6 +570,8 @@ def main() -> None:
     args = parser.parse_args()
 
     config = EvalConfig(
+        dataset=args.dataset,
+        data_path=args.data_path,
         subset=args.subset,
         split=args.split,
         limit=args.limit,
@@ -567,10 +626,7 @@ def main() -> None:
     process_dir.mkdir(exist_ok=True)
 
     # Load dataset
-    split = config.split
-    if config.limit is not None and config.limit > 0:
-        split = f"{split}[:{config.limit}]"
-    ds = load_dataset("hotpotqa/hotpot_qa", config.subset, split=split)
+    all_examples = load_dataset_examples(config)
 
     # Skip already done (optional)
     done_ids: set[str] = set()
@@ -581,30 +637,33 @@ def main() -> None:
             done_ids.update(worker_done)
 
     # Filter dataset
-    examples = []
-    for idx, ex in enumerate(ds):
-        if str(ex["id"]) not in done_ids:
-            ex["_idx"] = idx
-            examples.append(ex)
+    examples = [ex for ex in all_examples if str(ex["id"]) not in done_ids]
 
     if not examples:
         print("No new examples to evaluate.")
         return
 
     # Define tools as list of callables
+    # Note: search and get_document are configured and added in worker_process
     tool_funcs: list[Callable] = []
     search_toolkit: Optional[SearchToolkit] = None
     for tool_name in config.tools:
         if tool_name == "search_engine":
             tool_funcs.append(search_engine)
-            continue
-        if search_toolkit is None:
-            search_toolkit = SearchToolkit()
-        if tool_name == "search_wiki":
+        elif tool_name in ("search", "get_document"):
+            # These are handled in worker_process after configure_search
+            pass
+        elif tool_name == "search_wiki":
+            if search_toolkit is None:
+                search_toolkit = SearchToolkit()
             tool_funcs.append(search_toolkit.search_wiki)
         elif tool_name == "search_google":
+            if search_toolkit is None:
+                search_toolkit = SearchToolkit()
             tool_funcs.append(search_toolkit.search_google)
         elif tool_name == "search_tavily":
+            if search_toolkit is None:
+                search_toolkit = SearchToolkit()
             tool_funcs.append(search_toolkit.search_tavily)
         else:
             raise ValueError(f"Unsupported tool: {tool_name}")
@@ -685,6 +744,8 @@ def main() -> None:
         f"CSV: {csv_path}",
         "",
         "Arguments:",
+        f"  --dataset {config.dataset}",
+        f"  --data-path {config.data_path}",
         f"  --subset {config.subset}",
         f"  --split {config.split}",
         f"  --limit {config.limit}",

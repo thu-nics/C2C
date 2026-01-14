@@ -109,15 +109,10 @@ Provide a concise summary of your findings or answer."""
 
 # Error categorization for workflow evaluation
 ERROR_CATEGORIES = {
-    "Search Strategy Failure": "Poor/vague search queries, gave up too early, didn't try alternative search terms",
-    "Information Not Retrieved": "Searched appropriately but needed information not found by search engine",
-    "Retrieved Wrong Information": "Search engine returned incorrect/misleading facts that model trusted",
-    "Retrieved Related But Wrong Entity": "Found similar/related entity instead of the correct one",
-    "Information Retrieved But Ignored": "Had correct information in chat history but didn't use it in final answer",
-    "Multi-Hop Reasoning Failure": "Failed to properly connect information across multiple search hops",
-    "Question Misinterpretation": "Fundamentally misunderstood what the question was asking",
-    "Answer Extraction Error": "Had correct understanding but formatted/extracted answer incorrectly (too verbose, too brief, wrong specificity)",
-    "Premature Conclusion": "Concluded without sufficient verification or additional needed searches",
+    "Wrong Entity": "Retrieved information about a different but related entity (wrong person, place, year, etc.)",
+    "Question Misinterpretation": "Misunderstood what type of answer was needed (e.g., answered with name instead of description, character instead of series, demonym instead of count)",
+    "Answer Formatting": "Had correct information but extracted/formatted incorrectly (too verbose, too brief, wrong specificity, spelling variant)",
+    "False Negative": "Incorrectly concluded information doesn't exist or gave up when answer was findable",
 }
 
 ERROR_CATEGORIZATION_PROMPT = """Analyze this multi-agent research workflow that produced an incorrect answer.
