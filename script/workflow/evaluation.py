@@ -151,7 +151,7 @@ def evaluate_single(
     gold = ex["answer"]
 
     use_single = config.mode == "single"
-    use_tree = config.mode == "tree"
+    use_tree = config.mode in ("tree", "tool")
 
     tracker = InteractionTracker(tokenizer=tokenizer)
     tree_tracker = TreeTracker() if use_tree else None
@@ -540,7 +540,7 @@ def main() -> None:
     parser.add_argument("--model-provider", default="local", choices=["local", "openai", "gemini", "fireworks"],
                         help="Model provider: local (OpenAI-compatible), openai, or gemini")
     parser.add_argument("--tokenizer", default="Qwen/Qwen3-32B")
-    parser.add_argument("--mode", default="oneflow", choices=["oneflow", "single", "tree"])
+    parser.add_argument("--mode", default="oneflow", choices=["oneflow", "single", "tree", "tool"])
     parser.add_argument("--main_to_search", type=str, default="none", choices=["all", "initial", "none"])
     parser.add_argument("--search", type=str, default="none", choices=["all", "initial", "none"])
     parser.add_argument("--search_to_main", type=str, default="qr", choices=["all", "qr"])

@@ -200,6 +200,23 @@ def run_research(
             max_rounds=max_rounds,
             show_status=show_status,
         )
+    if mode == "tool":
+        from rosetta.workflow.toolflow import do_tool_research
+
+        return do_tool_research(
+            question=question,
+            main_model=main_model,
+            worker_model=worker_model,
+            rewind_model=rewind_model,
+            exam_model=exam_model,
+            think_model=think_model,
+            state_rule_actions=state_rule_actions,
+            tracker=tracker,
+            tree_tracker=tree_tracker,
+            worker_tools=worker_tools,
+            max_rounds=max_rounds,
+            show_status=show_status,
+        )
     raise ValueError(f"Unsupported mode: {mode}")
 
 
