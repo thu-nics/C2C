@@ -1098,7 +1098,7 @@ def focused_substep(
 
 def do_tree_research(
     question: str,
-    main_agent: ChatAgent,
+    main_model: BaseModelBackend,
     worker_model: BaseModelBackend,
     rewind_model: BaseModelBackend = None,
     exam_model: BaseModelBackend = None,
@@ -1124,7 +1124,7 @@ def do_tree_research(
 
     Args:
         question: The question to answer.
-        main_agent: Main agent for decision making.
+        main_model: Model for main decision-making agent.
         worker_model: Model for worker agent.
         rewind_model: Model for rewind agent. Defaults to worker_model.
         exam_model: Model for exam agent. Defaults to worker_model.
@@ -1149,6 +1149,12 @@ def do_tree_research(
         exam_model = worker_model
     if think_model is None:
         think_model = worker_model
+
+    # Create main agent from model
+    main_agent = ChatAgent(
+        system_message="You are a helpful assistant.",
+        model=main_model,
+    )
 
     # Create feedback agent
     # feedback_agent = FeedbackAgent(model=worker_model)
