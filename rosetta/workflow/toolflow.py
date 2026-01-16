@@ -73,6 +73,7 @@ def main_decision(
         system_message=MAIN_AGENT_SYSTEM_MESSAGE,
         model=main_model,
         external_tools=action_tools,
+        summarize_threshold=None,
     )
 
     # Sync history from previous rounds

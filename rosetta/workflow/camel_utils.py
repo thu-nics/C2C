@@ -2,6 +2,7 @@
 
 import os
 from typing import List, Optional, Any
+import json
 from dotenv import load_dotenv, find_dotenv
 
 from camel.messages import BaseMessage, FunctionCallingMessage
@@ -307,13 +308,16 @@ def add_tool_requests_to_chat_history(
     last_msg = chat_history[-1]
     if last_msg.get("role") == "assistant":
         # Format tool_calls according to what record_interaction expects
+        # Arguments must be JSON string for messages_to_memoryRecords
+        args = tool_request.args or {}
+        args_str = json.dumps(args) if isinstance(args, dict) else args
         last_msg["tool_calls"] = [
             {
                 "id": tool_request.tool_call_id,
                 "type": "function",
                 "function": {
                     "name": tool_request.tool_name,
-                    "arguments": tool_request.args or {},
+                    "arguments": args_str,
                 },
             }
         ]

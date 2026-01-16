@@ -5,7 +5,7 @@ To launch the server:
 
 CUDA_VISIBLE_DEVICES=0,1,2,3 python -m sglang.launch_server --model-path Qwen/Qwen3-32B --host 0.0.0.0 --tp-size 2 --dp-size 2 --tool-call-parser qwen --port 30000 --mem-fraction-static 0.8
 
-CUDA_VISIBLE_DEVICES=4,5 python -m sglang.launch_server --model-path Qwen/Qwen3-Embedding-8B --host 0.0.0.0 --tp-size 1 --dp-size 2 --is-embedding --port 30001 --mem-fraction-static 0.8
+CUDA_VISIBLE_DEVICES=1 python -m sglang.launch_server --model-path Qwen/Qwen3-Embedding-8B --host 0.0.0.0 --tp-size 1 --dp-size 1 --is-embedding --port 30001 --mem-fraction-static 0.8
 """
 
 import os
@@ -55,6 +55,16 @@ model = ModelFactory.create(
     api_key=os.getenv("FIREWORKS_API_KEY"),
     url="https://api.fireworks.ai/inference/v1",
 )
+worker_model = model
+
+worker_model = ModelFactory.create(
+    model_platform=ModelPlatformType.OPENAI_COMPATIBLE_MODEL,
+    # model_type="accounts/fireworks/models/kimi-k2-instruct-0905",
+    model_type=model.model_type,
+    model_config_dict={"temperature": 0.0, "max_tokens": 4096, "stream": False},
+    api_key=os.getenv("FIREWORKS_API_KEY"),
+    url="https://api.fireworks.ai/inference/v1",
+)
 # tokenizer_model_name = "moonshotai/Kimi-K2-Thinking"
 tokenizer_model_name = "Qwen/Qwen3-32B"
 
@@ -77,7 +87,7 @@ tokenizer_model_name = "Qwen/Qwen3-32B"
 # )
 # tokenizer_model_name = "Qwen/Qwen3-32B"
 
-worker_model = model
+
 rewind_model = model
 thinking_model = model
 exam_model = thinking_model

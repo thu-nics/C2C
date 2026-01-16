@@ -327,7 +327,8 @@ class ExecuteAction(ActionClass):
             system_message=WORKER_PROMPT,
             model=worker_model,
             tools=worker_tools,
-            max_iteration=max_iteration
+            max_iteration=max_iteration,
+            summarize_threshold=None
         )
 
         if num_fewshot > 0:
@@ -337,31 +338,55 @@ class ExecuteAction(ActionClass):
         if tracker is not None:
             tracker.register_tools(llm_id=step_idx + 1, tools=worker_tools)
 
-        response = worker_agent.step(task)
-        response_text = response.msg.content
-        tool_msgs_id = [i for i, msg in enumerate(worker_agent.chat_history) if msg['role'] == 'tool']
+        try:
+            response = worker_agent.step(task)
+            response_text = response.msg.content
+            tool_msgs_id = [i for i, msg in enumerate(worker_agent.chat_history) if msg['role'] == 'tool']
 
-        # Check completion status
-        check_prompt = EXECUTE_CHECK_PROMPT.format(task=task)
-        check_response = worker_agent.step(check_prompt)
-        completion_status, completion_note = ExecuteAction._parse_status(check_response.msg.content)
+            # Check completion status
+            check_prompt = EXECUTE_CHECK_PROMPT.format(task=task)
+            check_response = worker_agent.step(check_prompt)
+            completion_status, completion_note = ExecuteAction._parse_status(check_response.msg.content)
+        except Exception as e:
+            error_str = str(e)
+            # Check if it's a context length error
+            if "too long" in error_str.lower() or "context length" in error_str.lower() or "maximum context" in error_str.lower():
+                completion_status = "fail"
+                completion_note = (
+                    "The task generates too much context, which is too long for the subagent to process. "
+                    "Please break this task down into smaller, more focused subtasks. "
+                    "Each subtask should be self-contained and require less steps."
+                )
+                response_text = (
+                    "The subtask is too complicated to manage within one subagent execution. "
+                    "Please use the 'plan' action to break down this task into smaller, more manageable subtasks."
+                )
+                tool_msgs_id = []
+            else:
+                # Re-raise other exceptions
+                raise
 
         feedback = f"| {completion_status.capitalize()} | Sub-round {len(tool_msgs_id)} : {response_text}"
         if completion_status != "success" and completion_note:
             feedback += f"\n{completion_note}"
 
-        chat_history = context_records_to_memory_records(worker_agent.memory.retrieve())
+        # Get chat history and tools used (may be empty if error occurred early)
+        try:
+            chat_history = context_records_to_memory_records(worker_agent.memory.retrieve())
+        except:
+            chat_history = []
 
         # Extract tool names
         tools_used = []
-        for msg in worker_agent.chat_history:
-            if msg.get("role") == "assistant" and "tool_calls" in msg:
-                for tc in msg["tool_calls"]:
-                    tool_name = tc.get("function", {}).get("name")
-                    if tool_name and tool_name not in tools_used:
-                        tools_used.append(tool_name)
+        if hasattr(worker_agent, 'chat_history'):
+            for msg in worker_agent.chat_history:
+                if msg.get("role") == "assistant" and "tool_calls" in msg:
+                    for tc in msg["tool_calls"]:
+                        tool_name = tc.get("function", {}).get("name")
+                        if tool_name and tool_name not in tools_used:
+                            tools_used.append(tool_name)
 
-        record_interaction(tracker, worker_agent.chat_history, llm_id=step_idx + 1)
+            record_interaction(tracker, worker_agent.chat_history, llm_id=step_idx + 1)
 
         kwargs = {
             "num_tool_calls": len(tool_msgs_id),
@@ -641,7 +666,8 @@ class ThinkAction(ActionClass):
         """
         think_agent = ChatAgent(
             system_message="You are a reflection agent that suggests next steps.",
-            model=think_model
+            model=think_model,
+            summarize_threshold=None
         )
         context_records = main_agent.memory.retrieve()[1:]
         forward_records = context_records_to_memory_records(context_records)
