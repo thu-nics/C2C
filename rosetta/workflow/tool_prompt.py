@@ -1,16 +1,16 @@
 """Prompts for tree-based research workflow."""
 
 from typing import List
-from pydantic import Field
+from pydantic import Field, BaseModel
 
-MAIN_AGENT_SYSTEM_MESSAGE = """You are a helpful assistant that uses tool calls to help the user."""
+MAIN_AGENT_SYSTEM_MESSAGE = """You are a helpful assistant."""
 
 FORCE_ANSWER_PROMPT = """Based on the research above, answer the question now.
 
 Question: {question}
 """
 
-class AnswerFormat:
+class AnswerFormat(BaseModel):
     justification: str = Field(description="1-2 short sentences explaining the answer")
     answer: str = Field(description="The final answer span")
 
@@ -60,7 +60,7 @@ def build_task_state_prompt(
             "",
         ])
 
-    lines.append("Now, call the appropriate tool to proceed. Do NOT directly respond.")
+    lines.append("Now, call the appropriate tool to proceed whenever possible. You may directly respond (not recommended) ONLY when you have gathered sufficient information to deterministically answer the question.")
 
     return "\n".join(lines)
 

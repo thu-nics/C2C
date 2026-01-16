@@ -595,7 +595,8 @@ def do_execute(
         system_message=WORKER_PROMPT,
         model=worker_model,
         tools=worker_tools,
-        max_iteration=max_iteration
+        max_iteration=max_iteration,
+        summarize_threshold=None
     )
 
     # Add few-shot examples if requested

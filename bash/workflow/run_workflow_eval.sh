@@ -52,7 +52,7 @@ if not runs:
     sys.stderr.write(f"No runs defined in: {config_path}\n")
     sys.exit(1)
 
-flag_keys = {"resume", "judge_only", "enable_thinking"}
+flag_keys = {"resume", "judge_only", "enable_thinking", "stream", "patch"}
 
 for run in runs:
     if not isinstance(run, dict):
@@ -69,7 +69,8 @@ for run in runs:
         if value is None:
             continue
         arg = "--" + key.replace("_", "-")
-        if key in flag_keys:
+        normalized_key = key.replace("-", "_")
+        if normalized_key in flag_keys:
             if value:
                 cmd.append(arg)
             continue

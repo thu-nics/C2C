@@ -21,6 +21,7 @@ def create_model(
     api_key: Optional[str] = None,
     temperature: float = 0.0,
     max_tokens: int = 32768,
+    stream: Optional[bool] = None,
     chat_template_kwargs: Optional[dict] = None,
     **kwargs: Any,
 ):
@@ -65,10 +66,13 @@ def create_model(
     elif provider == "openai":
         model_type = model_type or ModelType.GPT_5_MINI
         config = ChatGPTConfig(max_tokens=max_tokens, temperature=temperature)
+        model_config_dict = config.as_dict()
+        if stream:
+            model_config_dict["stream"] = True
         return ModelFactory.create(
             model_platform=ModelPlatformType.OPENAI,
             model_type=model_type,
-            model_config_dict=config.as_dict(),
+            model_config_dict=model_config_dict,
             api_key=api_key,
         )
     elif provider == "gemini":
@@ -78,10 +82,13 @@ def create_model(
             temperature=temperature,
             reasoning_effort=kwargs.get("reasoning_effort", "medium"),
         )
+        model_config_dict = config.as_dict()
+        if stream:
+            model_config_dict["stream"] = True
         return ModelFactory.create(
             model_platform=ModelPlatformType.OPENAI_COMPATIBLE_MODEL,
             model_type=model_type,
-            model_config_dict=config.as_dict(),
+            model_config_dict=model_config_dict,
             api_key=api_key or os.getenv("GEMINI_API_KEY"),
             url="https://generativelanguage.googleapis.com/v1beta/openai/",
         )
@@ -91,10 +98,13 @@ def create_model(
             max_tokens=max_tokens,
             temperature=temperature,
         )
+        model_config_dict = config.as_dict()
+        if stream:
+            model_config_dict["stream"] = True
         return ModelFactory.create(
             model_platform=ModelPlatformType.OPENAI_COMPATIBLE_MODEL,
             model_type=model_type,
-            model_config_dict=config.as_dict(),
+            model_config_dict=model_config_dict,
             api_key=api_key or os.getenv("FIREWORKS_API_KEY"),
             url="https://api.fireworks.ai/inference/v1",
         )

@@ -4,6 +4,7 @@ Currently supported actions: execute, plan, think, answer
 Unsupported actions (raise NotImplementedError): parallel_execute, rewind, exam
 """
 
+import json
 from typing import Tuple, Optional, List, Any, Dict
 from camel.agents import ChatAgent
 from camel.models import BaseModelBackend
@@ -19,73 +20,20 @@ from rosetta.workflow.actions import (
     ExecuteAction,
     PlanAction,
     ThinkAction,
-    AnswerAction,
+    SubmitAction,
+    ContinueAction,
+    BreakAction,
+    ContextData,
+)
+from rosetta.workflow.ext_actions import (
     RewindAction,
     ExamAction,
     ParallelExecuteAction,
-    ContextData,
 )
 from rosetta.workflow.track import InteractionTracker, record_interaction, TreeTracker
 from rosetta.workflow.display import StatusLogger
 from rosetta.workflow.camel_utils import messages_to_memoryRecords, add_tool_requests_to_chat_history
-
-def state_rule(
-    _current_state: str,
-    state_sequence: Optional[List[StateResult]] = None,
-    full_state_rule_actions: Optional[List[str]] = None,
-) -> List[str]:
-    """Define available next states based on current state.
-
-    Currently restricts the initial state to plan/think, otherwise returns all actions.
-    Override this function to implement custom transitions.
-
-    Args:
-        _current_state: Current workflow state.
-        state_sequence: Full sequence of prior StateResult objects (unused for now).
-        full_state_rule_actions: Full action list to filter from.
-
-    Returns:
-        List of available action names for next transition.
-    """
-    actions = full_state_rule_actions
-    if _current_state == "initial":
-        # Always think or plan first
-        filtered = [action for action in actions if action in ("plan", "think")]
-        return filtered if filtered else list(actions)
-    else:
-        pass
-        # If not initial, don't think
-        # _current_state = [action for action in actions if action not in ("think")]
-        # actions = _current_state
-
-    if not state_sequence or not any(result.state == "plan" for result in state_sequence):
-        # If no plan, don't execute or parallel_execute
-        actions = [action for action in actions if action not in ("execute", "parallel_execute")]
-    if state_sequence:
-        last_stateResult = state_sequence[-1]
-        if last_stateResult.state == "rewind":
-            # If rewind, must plan again
-            filtered = [action for action in actions if action in ("plan")]
-            return filtered if filtered else list(actions)
-
-        # if last_stateResult.state == "execute":
-        #     # If execute, must plan again
-        #     filtered = [action for action in actions if action in ("plan")]
-        #     return filtered if filtered else list(actions)
-
-        # Count consecutive execute failures (fail/partial) without success
-        consecutive_failures = 0
-        for result in reversed(state_sequence):
-            if result.state in ("execute", "parallel_execute"):
-                status = result.kwargs.get("completion_status", "success")
-                if status in ("fail", "partial"):
-                    consecutive_failures += 1
-                else:  # success resets the count
-                    break
-        # if consecutive_failures >= 4 and "rewind" in actions:
-        #     return ["rewind"]
-
-    return actions
+from rosetta.workflow.rules import ActionRuleEnforcer, DEFAULT_ENFORCER
 
 def main_decision(
     state: str,
@@ -93,6 +41,7 @@ def main_decision(
     ctx: ContextData,
     question: str,
     state_rule_actions: Optional[List[str]] = None,
+    action_rule_enforcer: ActionRuleEnforcer = DEFAULT_ENFORCER,
     tracker: InteractionTracker = None,
 ) -> Tuple[str, dict, List[Dict[str, str]], ChatAgent]:
     """Master decision state: prompt main agent and determine next state.
@@ -109,13 +58,14 @@ def main_decision(
         ctx: FlowContext containing tasks and history.
         question: Research question.
         state_rule_actions: Full list of allowed action names.
+        action_rule_enforcer: Enforcer that filters actions based on rules.
         tracker: Interaction tracker.
 
     Returns:
         Tuple of (next_state, data, conversation, main_agent).
     """
     # Get allowed actions based on current state
-    available_actions = state_rule(state, ctx.stateResults_sequence, state_rule_actions)
+    available_actions = action_rule_enforcer.update_actions(state, ctx.stateResults_sequence, state_rule_actions)
     action_tools = get_action_tools(available_actions)
 
     # Create main agent with external tools
@@ -129,11 +79,14 @@ def main_decision(
     if ctx.history_records:
         main_agent.memory.write_records(messages_to_memoryRecords(ctx.history_records))
 
+    # Return break if no actions available
+    if not action_tools:
+        return "break", {}, [], main_agent
+
     # Build task state prompt
     prompt = build_task_state_prompt(ctx.pending, ctx.current, ctx.finished, question=question)
     response = main_agent.step(prompt)
-    response.info  # call to ensure lazy consumption of the response
-    
+    response.msg.content  # call to ensure lazy consumption of the response
     chat_history = main_agent.chat_history
     
     # Check for external tool request
@@ -143,11 +96,17 @@ def main_decision(
     if tool_requests and len(chat_history) > 0:
         chat_history = add_tool_requests_to_chat_history(chat_history, tool_requests[0])
     
-    record_interaction(tracker, chat_history, llm_id=0)
+    if tracker is not None:
+        record_interaction(tracker, chat_history, llm_id=0)
+        tracker.register_tools(llm_id=0, tools=action_tools)
     
     if not tool_requests:
-        # No tool called - return unknown state
-        return "unknown", {}, [], main_agent
+        # No tool called - return continue state with recent messages
+        conversation = [
+            {"role": "user", "content": prompt},
+            {"role": "assistant", "content": response.msg.content},
+        ]
+        return "continue", {"recent_messages": conversation}, conversation, main_agent
 
     request = tool_requests[0]
     next_state = request.tool_name
@@ -169,7 +128,8 @@ def do_tool_research(
     rewind_model: BaseModelBackend = None,
     exam_model: BaseModelBackend = None,
     think_model: BaseModelBackend = None,
-    state_rule_actions: Optional[List[str]] = ["execute", "parallel_execute", "plan", "think", "rewind", "answer", "exam"],
+    state_rule_actions: Optional[List[str]] = ["execute", "parallel_execute", "plan", "think", "rewind", "submit", "exam"],
+    action_rule_enforcer: ActionRuleEnforcer = DEFAULT_ENFORCER,
     tracker: InteractionTracker = None,
     tree_tracker: TreeTracker = None,
     worker_tools: List[FunctionTool] = None,
@@ -191,6 +151,7 @@ def do_tool_research(
         exam_model: Model for exam agent. Defaults to worker_model.
         think_model: Model for think agent. Defaults to worker_model.
         state_rule_actions: List of allowed action names. Defaults to supported actions.
+        action_rule_enforcer: Enforcer that filters actions based on rules. Defaults to DEFAULT_ENFORCER.
         tracker: Interaction tracker.
         tree_tracker: Tree structure tracker.
         worker_tools: List of tools for worker. Defaults to [Google search].
@@ -218,14 +179,9 @@ def do_tool_research(
     for _ in range(max_rounds):
         # Master decision: determine next state
         next_state, data, conversation, main_agent = main_decision(
-            state, main_model, ctx, question, state_rule_actions, tracker
+            state, main_model, ctx, question, state_rule_actions, action_rule_enforcer, tracker
         )
 
-        if next_state == "unknown":
-            # No tool called - shouldn't happen, but handle that by entering answer state
-            print("No tool called - entering answer state")
-            print(main_agent.chat_history)
-            break
 
         if tree_tracker is not None:
             parent_id = tree_tracker.get_current_parent()
@@ -268,11 +224,17 @@ def do_tool_research(
                 result = ExamAction.do(
                     exam_model, main_agent, ctx.stateResults_sequence, data.get("step", 0), question, tracker
                 )
-                    # Handle answer - terminal state
-            elif next_state == "answer":
+            elif next_state == "submit":
                 answer = data.get("answer", "")
                 justification = data.get("justification", "")
-                result = AnswerAction.do(answer, justification)
+                result = SubmitAction.do(answer, justification)
+
+            elif next_state == "break":
+                result = BreakAction.do()
+
+            elif next_state == "continue":
+                recent_messages = data.get("recent_messages", [])
+                result = ContinueAction.do(recent_messages)
             else:
                 break  # Unknown state
 
@@ -298,9 +260,11 @@ def do_tool_research(
 
         state = next_state
 
-        # Exit if answer state
-        if next_state == "answer":
-            return result.kwargs.get("answer", ""), tracker
+        # Exit if submit state
+        if next_state == "submit":
+            return result.feedback, tracker
+        elif next_state == "break":
+            break
 
     # Fallback: answer directly using chat history
     main_agent = ChatAgent(
@@ -316,7 +280,7 @@ def do_tool_research(
     answer = response.msg.content
 
     if tracker is not None:
-        tracker.state_sequence = ctx.action_sequence + ["answer"]
+        tracker.state_sequence = ctx.action_sequence + ["forceAnswer"]
         tracker.state_results = ctx.stateResults_sequence
     return answer, tracker
 

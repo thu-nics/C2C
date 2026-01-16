@@ -10,6 +10,7 @@ Currently supported actions: execute, plan, think, answer
 
 import re
 import functools
+import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import List, Optional, Any, Dict, TYPE_CHECKING
@@ -61,6 +62,38 @@ def register_action(name: str, supported: bool = True):
         return cls
     return decorator
 
+def get_action_tools(actions: List[str]) -> List:
+    """Get interface functions for specified action names.
+
+    Args:
+        actions: List of action names to include.
+
+    Returns:
+        List of FunctionTool objects with action names as tool names.
+    """
+    tools = []
+    for name in actions:
+        if name not in ACTIONS:
+            continue
+        action_class = ACTIONS[name]
+        # Create wrapper with correct name (so FunctionTool uses action name, not "interface")
+        @functools.wraps(action_class.interface)
+        def wrapper(*args, _interface=action_class.interface, **kwargs):
+            return _interface(*args, **kwargs)
+        wrapper.__name__ = name
+        tools.append(FunctionTool(wrapper))
+    return tools
+
+def is_action_supported(action_name: str) -> bool:
+    """Check if an action's do() method is implemented.
+
+    Args:
+        action_name: Name of the action to check.
+
+    Returns:
+        True if the action is fully supported, False otherwise.
+    """
+    return action_name in SUPPORTED_ACTIONS
 
 """
 STATE RESULT CLASS
@@ -250,18 +283,16 @@ class ExecuteAction(ActionClass):
 
     @staticmethod
     def interface(task: str) -> dict:
-        """Execute a subtask using a worker agent.
+        """Execute - work on the current task.
 
-        Work on the current task by delegating to a subagent that can search
-        the internet or answer directly.
+        This function uses another agent to work on the current task, with addtional tools, such as internet search.
 
         Guidelines:
-        - Include ALL context the subagent needs in the task description.
-        - The subagent cannot see any prior conversation.
+        - In `task`, include all and only the context the subagent needs; assume it cannot see any prior conversation.
         - Include what was already found; focus only on the remaining information needed.
 
         Args:
-            task: Complete description of the subtask with all necessary context.
+            task: Self-contained subtask with necessary context.
 
         Returns:
             Dict with task echoed back.
@@ -377,19 +408,15 @@ class PlanAction(ActionClass):
 
     @staticmethod
     def interface(tasks: List[str]) -> dict:
-        """Replace current and pending tasks with a list of new tasks.
-
-        Replaces all current and pending tasks with new tasks. Finished tasks
-        are preserved. Use this to decompose the problem or adjust strategy.
+        """Plan tasks - replaces all current and pending tasks with a list of new tasks. Finished tasks are preserved.
 
         Guidelines:
-        - Each task must be narrowly scoped and achievable within a few searches.
-        - Each task should have a clear desired result.
-        - For failed/partial tasks, change the approach rather than repeating.
-        - You may split one subtask into multiple smaller subtasks when helpful.
+        - You may split one task into multiple smaller subtasks when helpful.
+        - Each task must be narrowly scoped, achievable within a few searches, and have a clear desired result.
+        - For failed/partial tasks, change the approach rather than repeating the same task.
 
         Args:
-            tasks: List of new task descriptions.
+            tasks: List of revised task descriptions.
 
         Returns:
             Dict with tasks echoed back.
@@ -439,25 +466,23 @@ class PlanAction(ActionClass):
         ctx.pending = result.tasks if result.tasks else []
         ctx.promote_task()
 
-@register_action("answer", supported=True)
-class AnswerAction(ActionClass):
-    """Provide the final answer."""
+@register_action("submit", supported=True)
+class SubmitAction(ActionClass):
+    """Submit the final response."""
 
     @staticmethod
     def interface(answer: str, justification: str = "") -> dict:
-        """Provide the final answer to the user.
+        """Answer - final response when you have enough verified information.
 
-        Use this action only when you have enough verified information to respond
-        conclusively.
+        Use this action only when you have enough verified information to respond conclusively.
 
         Guidelines:
-        - Use only when sufficient information has been gathered.
-        - Keep justification to 1-2 short sentences.
-        - Put the final answer span in 'answer', brief rationale in 'justification'.
+        - Keep the justification to 1-2 short sentences.
+        - Put the final answer span in `answer` and the brief rationale in `justification`.
 
         Args:
-            answer: The final answer span.
-            justification: Brief 1-2 sentence rationale (optional).
+            answer: Final answer span.
+            justification: 1-2 short sentences of rationale (optional).
 
         Returns:
             Dict with answer and justification echoed back.
@@ -476,16 +501,91 @@ class AnswerAction(ActionClass):
             StateResult with answer.
         """
         
+        payload = {"answer": answer, "justification": justification}
+        payload_str = json.dumps(payload, ensure_ascii=False)
         return StateResult(
-            feedback=f"Answer: {answer}",
+            feedback=payload_str,
             records=[
-                {"role": "user", "content": f"Based on the research above, answer the question."},
-                {"role": "assistant", "content": f"Answer: {answer}\nJustification: {justification}"},
+                {"role": "user", "content": "Based on the research above, answer the question."},
+                {"role": "assistant", "content": payload_str},
             ],
-            state="answer",
-            kwargs={"answer": answer, "justification": justification},
+            state="submit",
+            kwargs=payload,
         )
 
+
+
+@register_action("continue", supported=True)
+class ContinueAction(ActionClass):
+    """Continue without tool call - simply feed back the last response."""
+
+    @staticmethod
+    def display(data: dict) -> str:
+        """Return status description for continue action."""
+        return "Continuing..."
+
+    @staticmethod
+    def interface() -> dict:
+        """Continue - placeholder interface (not called by LLM)."""
+        return {}
+
+    @staticmethod
+    def do(recent_messages: List[Dict[str, str]]) -> StateResult:
+        """Continue without tool call.
+
+        Args:
+            recent_messages: The last two messages (user prompt and assistant response).
+
+        Returns:
+            StateResult with feedback and records.
+        """
+        last_response = recent_messages[-1].get("content", "") if recent_messages else ""
+        return StateResult(
+            feedback=last_response,
+            records=recent_messages,
+            state="continue",
+        )
+
+    @staticmethod
+    def update(ctx: "ContextData", result: StateResult) -> None:
+        """Update context after continue action.
+
+        Only extends history records, does not increment step.
+        """
+        ctx.history_records.extend(result.records)
+
+
+@register_action("break", supported=True)
+class BreakAction(ActionClass):
+    """Break out of the main loop when no actions are available."""
+
+    @staticmethod
+    def display(data: dict) -> str:
+        """Return status description for break action."""
+        return "Breaking - no actions available"
+
+    @staticmethod
+    def interface() -> dict:
+        """Break - exit the workflow loop."""
+        return {}
+
+    @staticmethod
+    def do() -> StateResult:
+        """Break out of the loop.
+
+        Returns:
+            StateResult indicating break.
+        """
+        return StateResult(
+            feedback="No actions available, breaking out of loop",
+            records=[],
+            state="break",
+        )
+
+    @staticmethod
+    def update(ctx: "ContextData", result: StateResult) -> None:
+        """No context update needed for break."""
+        pass
 
 
 @register_action("think", supported=True)
@@ -512,14 +612,9 @@ class ThinkAction(ActionClass):
 
     @staticmethod
     def interface() -> dict:
-        """Pause to reflect and get a concise assessment before choosing next action.
+        """Think - pause to reflect and get a concise assessment before choosing next action.
 
-        Use this action when the next operation is unclear and you need a brief
-        assessment before proceeding.
-
-        Guidelines:
-        - Use sparingly, only when genuinely uncertain about direction.
-        - The reflection will provide actionable next steps.
+        Use this action when the next operation is unclear and you need a brief assessment before proceeding.
 
         Returns:
             Empty dict (no arguments needed).
@@ -566,227 +661,3 @@ class ThinkAction(ActionClass):
             state="think",
             chat_history=context_records_to_memory_records(think_agent.memory.retrieve()),
         )
-
-
-# =============================================================================
-# UNSUPPORTED ACTIONS
-# These actions are defined but not yet implemented. They raise NotImplementedError
-# when their do() method is called.
-# =============================================================================
-
-
-@register_action("parallel_execute", supported=False)
-class ParallelExecuteAction(ActionClass):
-    """Run multiple tasks in parallel.
-
-    NOT SUPPORTED: Parallel execution requires thread pool management and
-    result aggregation logic. Use sequential ExecuteAction calls instead.
-    """
-
-    @staticmethod
-    def display(data: dict) -> str:
-        """Return status description for parallel execute action."""
-        tasks = data.get("tasks", [])
-        return f"Executing {len(tasks)} tasks in parallel"
-
-    @staticmethod
-    def interface(tasks: List[str]) -> dict:
-        """Run independent tasks in parallel using multiple worker agents.
-
-        Use when multiple tasks are independent and can be executed concurrently.
-        Results will be collected and presented as multi-round conversation records.
-
-        Guidelines:
-        - Use only when tasks are truly independent of each other.
-        - Each task must be self-contained with all context needed.
-        - Subagents cannot see prior conversation or each other's results.
-
-        Args:
-            tasks: List of independent task descriptions.
-
-        Returns:
-            Dict with tasks echoed back.
-        """
-        return {"tasks": tasks}
-
-    @staticmethod
-    def do(*args, **kwargs) -> StateResult:
-        """NOT IMPLEMENTED: Parallel execution not yet supported.
-
-        Reason: Requires ThreadPoolExecutor management, result aggregation,
-        and handling of concurrent tracker updates. Use sequential execute calls.
-        """
-        raise NotImplementedError(
-            "ParallelExecuteAction.do() is not supported. "
-            "Parallel execution requires thread pool management and result aggregation. "
-            "Use sequential ExecuteAction calls instead."
-        )
-
-
-@register_action("rewind", supported=False)
-class RewindAction(ActionClass):
-    """Backtrack to a previous state.
-
-    NOT SUPPORTED: Rewind requires history analysis, turn identification,
-    and state rollback logic that is not yet implemented.
-    """
-
-    @staticmethod
-    def display(data: dict) -> str:
-        """Return status description for rewind action."""
-        return "Analyzing rewind point"
-
-    @staticmethod
-    def interface() -> dict:
-        """Backtrack when similar tasks fail repeatedly or exploring wrong direction.
-
-        Use when similar tasks fail repeatedly (similar query variations, similar
-        dead ends) or when exploring the wrong entity or topic.
-
-        Guidelines:
-        - Use when multiple similar approaches have failed.
-        - After rewinding, you must switch to a different approach.
-        - Rewind analyzes history to find the best backtrack point.
-
-        Returns:
-            Empty dict (no arguments needed).
-        """
-        return {}
-
-    @staticmethod
-    def do(rewind_model: BaseModelBackend, messages: List[dict]) -> StateResult:
-        """NOT IMPLEMENTED: Rewind not yet supported.
-
-        Reason: Requires parsing numbered history turns, identifying optimal
-        backtrack points, and rolling back FlowContext state (tasks, history).
-        """
-        raise NotImplementedError(
-            "RewindAction.do() is not supported. "
-            "Rewind requires history analysis, turn identification, and state rollback. "
-            "This feature is planned for future implementation."
-        )
-        history_str = RewindAction.format_history_numbered(messages)
-        rewind_agent = ChatAgent(
-            system_message="You analyze research history to find rewind points.",
-            model=rewind_model
-        )
-        response = rewind_agent.step(REWIND_PROMPT.format(history=history_str))
-        rewind_turn, summary = RewindAction.parse_rewind(response.msg.content)
-
-        return StateResult(
-            feedback=f"Rewinding to turn {rewind_turn or 0}",
-            records=[],  # Rewind doesn't add records directly
-            state="rewind",
-            chat_history=context_records_to_memory_records(rewind_agent.memory.retrieve()),
-            kwargs={"rewind_to_step": rewind_turn or 0, "summary": summary or ""},
-        )
-
-    @staticmethod
-    def update(ctx: "ContextData", result: StateResult) -> None:
-        """Update context after rewind action.
-
-        Rolls back history and tasks to the target step.
-        Does NOT increment step (rewind resets it).
-        """
-        rewind_to_step = result.kwargs.get("rewind_to_step", 0)
-        summary = result.kwargs.get("summary", "")
-
-        # Find the target round from step
-        target_round = ctx._step_to_round.get(rewind_to_step)
-        if target_round is not None:
-            snapshot = ctx._snapshots.get(target_round, {})
-            # Restore task lists
-            ctx.pending = list(snapshot.get("pending", []))
-            ctx.current = list(snapshot.get("current", []))
-            ctx.finished = list(snapshot.get("finished", []))
-            ctx.step = snapshot.get("step", rewind_to_step)
-            # Rollback history to snapshot point
-            history_len = snapshot.get("history_len", 0)
-            ctx.history_records = ctx.history_records[:history_len]
-            # Clear step_to_round entries after current step
-            ctx._step_to_round = {s: r for s, r in ctx._step_to_round.items() if s <= ctx.step}
-
-        # Add summary as assistant message if provided
-        if summary:
-            ctx.history_records.append({"role": "assistant", "content": summary})
-
-
-@register_action("exam", supported=False)
-class ExamAction(ActionClass):
-    """Verify a previous step's result.
-
-    NOT SUPPORTED: Exam requires accessing step history, formatting subagent
-    chat logs, and parsing verification verdicts.
-    """
-
-    @staticmethod
-    def display(data: dict) -> str:
-        """Return status description for exam action."""
-        step = data.get("step", 0)
-        return f"Examining step {step}"
-
-    @staticmethod
-    def interface(step: int) -> dict:
-        """Verify a previous step's result for correctness.
-
-        Use this action to verify a specific prior step when its result is
-        suspicious, inconsistent, or high-impact.
-
-        Guidelines:
-        - Use when a result seems suspicious or inconsistent.
-        - Use for high-impact results that affect the final answer.
-        - Provide the 1-indexed step number to examine.
-
-        Args:
-            step: The 1-indexed step number to examine.
-
-        Returns:
-            Dict with step echoed back.
-        """
-        return {"step": step}
-
-    @staticmethod
-    def do(*args, **kwargs) -> StateResult:
-        """NOT IMPLEMENTED: Exam not yet supported.
-
-        Reason: Requires accessing StateResult history by step index, formatting
-        subagent chat histories for verification, and parsing exam verdicts.
-        """
-        raise NotImplementedError(
-            "ExamAction.do() is not supported. "
-            "Exam requires step history access and verification verdict parsing. "
-            "This feature is planned for future implementation."
-        )
-
-def get_action_tools(actions: List[str]) -> List:
-    """Get interface functions for specified action names.
-
-    Args:
-        actions: List of action names to include.
-
-    Returns:
-        List of FunctionTool objects with action names as tool names.
-    """
-    tools = []
-    for name in actions:
-        if name not in ACTIONS:
-            continue
-        action_class = ACTIONS[name]
-        # Create wrapper with correct name (so FunctionTool uses action name, not "interface")
-        @functools.wraps(action_class.interface)
-        def wrapper(*args, _interface=action_class.interface, **kwargs):
-            return _interface(*args, **kwargs)
-        wrapper.__name__ = name
-        tools.append(FunctionTool(wrapper))
-    return tools
-
-def is_action_supported(action_name: str) -> bool:
-    """Check if an action's do() method is implemented.
-
-    Args:
-        action_name: Name of the action to check.
-
-    Returns:
-        True if the action is fully supported, False otherwise.
-    """
-    return action_name in SUPPORTED_ACTIONS

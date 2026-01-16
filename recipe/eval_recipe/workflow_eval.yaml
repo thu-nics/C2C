@@ -1,36 +1,68 @@
 base:
   subset: distractor
   split: validation
-  limit: 5
+  limit: 100
   max_rounds: 20
   output_format: json
-  # model_url: http://localhost:30000/v1
-  # model_provider: local
-  model_provider: fireworks
-  judge_model_provider: fireworks
+  model_url: http://localhost:30000/v1
+  model_provider: local
+  # judge_model_provider: local
+  
+  # judge_model_provider: fireworks
   tokenizer: Qwen/Qwen3-32B
-  num_workers: 5
+  num_workers: 25
 
 runs:
-  # - name: tree
-  #   mode: tree
+  - name: Qwen3_32b
+    mode: tool
+    model_provider: local
+    model_type: Qwen/Qwen3-32B
+    tools:
+      - search_engine
+    dataset: hotpotqa
+    output: local/evaluation/qwen3_32b/tool_EPA/hotpotqa.json
+    state_rule:
+      - execute
+      - plan
+      - submit
+
+  # - name: Qwen3_235b_instruct
+  #   mode: tool
+  #   model_provider: fireworks
+  #   model_type: accounts/fireworks/models/qwen3-235b-a22b-instruct-2507
   #   tools:
   #     - search_engine
   #   dataset: hotpotqa
-  #   output: local/evaluation/qwen3_235b_a22b_instruct_2507/tree_EPA/hotpotqa.json
+  #   output: local/evaluation/qwen3_235b/tool_EPA/hotpotqa.json
+  #   state_rule:
+  #     - execute
+  #     - plan
+  #     - submit
+
+  # - name: Qwen3_235b_thinking
+  #   mode: tree
+  #   model_provider: fireworks
+  #   model_type: accounts/fireworks/models/qwen3-235b-a22b-thinking-2507
+  #   patch: true
+  #   tools:
+  #     - search_engine
+  #   dataset: hotpotqa
+  #   output: local/evaluation/qwen3_235b_thinking/tree_EPA/hotpotqa.json
   #   state_rule:
   #     - execute
   #     - plan
   #     - answer
 
-  - name: tree
-    mode: tree
-    tools:
-      - search
-      - get_document
-    dataset: browsecomp
-    output: local/evaluation/qwen3_235b_a22b_instruct_2507/tree_EPA/browsecomp.json
-    state_rule:
-      - execute
-      - plan
-      - answer
+  # - name: Kimi_k2_instruct
+  #   mode: tree
+  #   model_provider: fireworks
+  #   model_type: accounts/fireworks/models/kimi-k2-instruct-0905
+  #   stream: True
+  #   tools:
+  #     - search_engine
+  #   dataset: hotpotqa
+  #   output: local/evaluation/kimi_k2_instruct/tree_EPA/hotpotqa.json
+  #   state_rule:
+  #     - execute
+  #     - plan
+  #     - answer

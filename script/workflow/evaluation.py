@@ -83,6 +83,8 @@ class EvalConfig:
     judge_model_type: Optional[str] = None  # Model type for LLM judge
     step_timeout: Optional[float] = None  # Timeout in seconds for agent step calls
     enable_thinking: bool = False  # Enable thinking mode for main agent (local models only)
+    stream: bool = False  # Enable streaming responses (adds {"stream": True} to model_config_dict)
+    patch: bool = False  # Patch mode: re-run only failed examples from existing output
 
 def create_context_plan(config: EvalConfig, use_single: bool, use_tree: bool) -> Optional[dict]:
     """Create context plan based on configuration."""
@@ -249,6 +251,7 @@ def worker_process(
         provider=config.model_provider,
         model_type=config.model_type,
         model_url=config.model_url,
+        stream=config.stream,
         chat_template_kwargs=main_chat_template_kwargs,
     )
 
@@ -257,12 +260,14 @@ def worker_process(
         provider=config.model_provider,
         model_type=config.model_type,
         model_url=config.model_url,
+        stream=config.stream,
     )
     # Create thinking model (always enable thinking for search)
     thinking_model = create_model(
         provider=config.model_provider,
         model_type=config.model_type,
         model_url=config.model_url,
+        stream=config.stream,
         chat_template_kwargs={"enable_thinking": True} if config.model_provider == "local" else None,
     )
 
@@ -291,37 +296,20 @@ def worker_process(
             f.flush()
 
 
-def aggregate_results(process_dir: Path, output_path: Path, output_format: str) -> tuple[int, int]:
-    """Aggregate results from all worker files."""
-    # Collect all worker files
-    worker_files = sorted(process_dir.glob("worker_*.jsonl"))
-
-    # Determine output paths
-    if output_format == "jsonl":
-        final_jsonl = output_path
-    else:
-        final_jsonl = output_path.with_suffix(".jsonl")
-
-    # Aggregate into single JSONL
-    total = 0
-    correct = 0
-
-    with final_jsonl.open("w", encoding="utf-8") as out_f:
-        for worker_file in worker_files:
-            with worker_file.open("r", encoding="utf-8") as in_f:
-                for line in in_f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        obj = json.loads(line)
-                        out_f.write(json.dumps(obj, ensure_ascii=False) + "\n")
-                        total += 1
-                        correct += int(obj.get("correct_em", False))
-                    except json.JSONDecodeError:
-                        continue
-
-    return total, correct
+def read_worker_records(process_dir: Path) -> list[dict]:
+    """Read all records from worker files."""
+    records: list[dict] = []
+    for worker_file in sorted(process_dir.glob("worker_*.jsonl")):
+        with worker_file.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    return records
 
 
 JUDGE_FIELDS = ["idx", "example_id", "question", "gold_answer", "pred_answer",
@@ -363,6 +351,7 @@ def run_llm_judge(jsonl_path: Path, config: EvalConfig, max_workers: int = 32) -
         provider=config.judge_model_provider,
         model_type=config.judge_model_type or config.model_type,
         model_url=config.judge_api_url or config.model_url,
+        stream=config.stream,
         chat_template_kwargs={"enable_thinking": True} if config.judge_model_provider == "local" else None,
     )
     judge = LLMJudge(judge_model, max_workers=max_workers)
@@ -567,6 +556,12 @@ def main() -> None:
     parser.add_argument("--judge-model-type", type=str, default=None, help="Model type for LLM judge")
     parser.add_argument("--step-timeout", type=float, default=None, help="Timeout in seconds for agent step calls")
     parser.add_argument("--enable-thinking", action="store_true", help="Enable thinking mode for main agent (local models only)")
+    parser.add_argument("--stream", action="store_true", help="Enable streaming (adds {'stream': True} to model_config_dict)")
+    parser.add_argument(
+        "--patch",
+        action="store_true",
+        help="Re-run only examples with non-empty 'error' in existing output JSONL",
+    )
     args = parser.parse_args()
 
     config = EvalConfig(
@@ -596,6 +591,8 @@ def main() -> None:
         judge_model_type=args.judge_model_type,
         step_timeout=args.step_timeout,
         enable_thinking=args.enable_thinking,
+        stream=args.stream,
+        patch=args.patch,
     )
 
     config.output.parent.mkdir(parents=True, exist_ok=True)
@@ -628,16 +625,34 @@ def main() -> None:
     # Load dataset
     all_examples = load_dataset_examples(config)
 
-    # Skip already done (optional)
-    done_ids: set[str] = set()
-    if config.resume:
-        # Check existing worker files
-        for worker_file in process_dir.glob("worker_*.jsonl"):
-            worker_done = load_done_ids(worker_file)
-            done_ids.update(worker_done)
+    # Patch mode: re-run only examples that failed previously
+    existing_records: list[dict] | None = None
+    if config.patch:
+        jsonl_path = get_jsonl_path(config)
+        if not jsonl_path.exists():
+            print(f"Error: Input file not found for patch mode: {jsonl_path}")
+            return
+        existing_records = read_jsonl(jsonl_path)
+        error_ids = {
+            str(r.get("example_id"))
+            for r in existing_records
+            if r.get("error")
+        }
+        if not error_ids:
+            print("No failed examples found to patch.")
+            return
+        examples = [ex for ex in all_examples if str(ex["id"]) in error_ids]
+    else:
+        # Skip already done (optional)
+        done_ids: set[str] = set()
+        if config.resume:
+            # Check existing worker files
+            for worker_file in process_dir.glob("worker_*.jsonl"):
+                worker_done = load_done_ids(worker_file)
+                done_ids.update(worker_done)
 
-    # Filter dataset
-    examples = [ex for ex in all_examples if str(ex["id"]) not in done_ids]
+        # Filter dataset
+        examples = [ex for ex in all_examples if str(ex["id"]) not in done_ids]
 
     if not examples:
         print("No new examples to evaluate.")
@@ -714,8 +729,19 @@ def main() -> None:
         p.join()
 
     # Aggregate results
-    total, correct_em = aggregate_results(process_dir, config.output, config.output_format)
     jsonl_path = get_jsonl_path(config)
+    worker_records = read_worker_records(process_dir)
+    if config.patch:
+        existing_by_id = {str(r.get("example_id")): r for r in (existing_records or [])}
+        for rec in worker_records:
+            existing_by_id[str(rec.get("example_id"))] = rec
+        merged_records = list(existing_by_id.values())
+    else:
+        merged_records = worker_records
+
+    write_jsonl(jsonl_path, merged_records)
+    total = len(merged_records)
+    correct_em = sum(1 for r in merged_records if r.get("correct_em", False))
 
     # LLM judge for answer correctness and error categorization
     print("\nRunning LLM judge...")

@@ -8,6 +8,7 @@ and LLM-based answer evaluation with error categorization.
 from __future__ import annotations
 
 import json
+import ast
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -59,6 +60,13 @@ def extract_answer(pred_raw: str) -> Optional[str]:
                 return obj["answer"].strip()
         except json.JSONDecodeError:
             pass
+        # Try Python dict literal (single quotes)
+        try:
+            obj = ast.literal_eval(s)
+            if isinstance(obj, dict) and isinstance(obj.get("answer"), str):
+                return obj["answer"].strip()
+        except Exception:
+            pass
 
     # 2) First {...} blob in the text
     first = s.find("{")
@@ -70,6 +78,12 @@ def extract_answer(pred_raw: str) -> Optional[str]:
             if isinstance(obj, dict) and isinstance(obj.get("answer"), str):
                 return obj["answer"].strip()
         except json.JSONDecodeError:
+            pass
+        try:
+            obj = ast.literal_eval(blob)
+            if isinstance(obj, dict) and isinstance(obj.get("answer"), str):
+                return obj["answer"].strip()
+        except Exception:
             pass
 
     # 3) Look for an "answer" field line
@@ -202,6 +216,13 @@ def run_research(
         )
     if mode == "tool":
         from rosetta.workflow.toolflow import do_tool_research
+        from rosetta.workflow.rules import ActionRuleEnforcer, ActionRule
+
+        action_rule_enforcer = ActionRuleEnforcer(
+            ActionRule.require_initial_plan_or_think,
+            ActionRule.require_continue_before_submit,
+            ActionRule.break_on_consecutive_continue,
+        )
 
         return do_tool_research(
             question=question,
@@ -211,6 +232,7 @@ def run_research(
             exam_model=exam_model,
             think_model=think_model,
             state_rule_actions=state_rule_actions,
+            action_rule_enforcer=action_rule_enforcer,
             tracker=tracker,
             tree_tracker=tree_tracker,
             worker_tools=worker_tools,
