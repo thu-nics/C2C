@@ -56,8 +56,9 @@ class InteractionTracker:
         self._llm_tools: dict[int, list] = {}  # llm_id -> tools list
         self.state_sequence: list[str] = []
         self.state_results: list = []
+        self._usage_per_interaction: list[Optional[dict]] = []  # usage dict per interaction
 
-    def record(self, messages: list[dict], llm_id: int = 0) -> int:
+    def record(self, messages: list[dict], llm_id: int = 0, usage: Optional[dict] = None) -> int:
         """Record an interaction from a message list.
 
         Args:
@@ -65,6 +66,7 @@ class InteractionTracker:
                       "tool_calls", "tool_call_id" keys.
                       Last message must have role="assistant".
             llm_id: Identifier for the LLM that generated the response.
+            usage: Optional usage dict with token counts (completion_tokens, prompt_tokens, total_tokens, etc.)
 
         Returns:
             interaction_id (0-indexed)
@@ -127,6 +129,7 @@ class InteractionTracker:
 
         interaction_id = len(self._interactions)
         self._interactions.append((llm_id, response_uid, context_uids))
+        self._usage_per_interaction.append(usage)
 
         return interaction_id
 
@@ -328,6 +331,15 @@ class InteractionTracker:
         lines.append("=" * 40)
         lines.append(f"Pool size: {pool_size}, Interactions: {num_interactions}")
 
+        # Add usage statistics
+        usage_stats = self.get_usage_stats()
+        if usage_stats["num_interactions"] > 0:
+            lines.append("")
+            lines.append("Token Usage:")
+            lines.append(f"  Total tokens: {usage_stats['total_tokens']}")
+            lines.append(f"  Prompt tokens: {usage_stats['prompt_tokens']} (cached: {usage_stats['cached_tokens']})")
+            lines.append(f"  Completion tokens: {usage_stats['completion_tokens']}")
+
         return "\n".join(lines)
 
     def _str_concise(self, uid_to_tid: dict[int, int], matrix: np.ndarray) -> str:
@@ -411,6 +423,15 @@ class InteractionTracker:
 
         lines.append("=" * 50)
         lines.append(f"Pool size: {pool_size}, Content groups: {num_tcids}, Interactions: {num_interactions}")
+
+        # Add usage statistics
+        usage_stats = self.get_usage_stats()
+        if usage_stats["num_interactions"] > 0:
+            lines.append("")
+            lines.append("Token Usage:")
+            lines.append(f"  Total tokens: {usage_stats['total_tokens']}")
+            lines.append(f"  Prompt tokens: {usage_stats['prompt_tokens']} (cached: {usage_stats['cached_tokens']})")
+            lines.append(f"  Completion tokens: {usage_stats['completion_tokens']}")
 
         return "\n".join(lines)
 
@@ -550,6 +571,44 @@ class InteractionTracker:
         """Return list of unique LLM IDs that have recorded interactions."""
         return list({llm_id for llm_id, _, _ in self._interactions})
 
+    def get_usage_stats(self, llm_id: Optional[int] = None) -> dict:
+        """Get token usage statistics.
+
+        Args:
+            llm_id: If provided, return stats for specific LLM. Otherwise return total across all LLMs.
+
+        Returns:
+            Dict with 'completion_tokens', 'prompt_tokens', 'total_tokens', 'cached_tokens', 'num_interactions'.
+        """
+        stats = {
+            "completion_tokens": 0,
+            "prompt_tokens": 0,
+            "total_tokens": 0,
+            "cached_tokens": 0,
+            "num_interactions": 0,
+        }
+
+        for i, (lid, _, _) in enumerate(self._interactions):
+            if llm_id is not None and lid != llm_id:
+                continue
+
+            usage = self._usage_per_interaction[i]
+            if usage is None:
+                continue
+
+            stats["num_interactions"] += 1
+            stats["completion_tokens"] += usage.get("completion_tokens", 0)
+            stats["prompt_tokens"] += usage.get("prompt_tokens", 0)
+            stats["total_tokens"] += usage.get("total_tokens", 0)
+
+            # Handle cached tokens from prompt_tokens_details
+            if "prompt_tokens_details" in usage:
+                details = usage["prompt_tokens_details"]
+                if details and "cached_tokens" in details:
+                    stats["cached_tokens"] += details["cached_tokens"]
+
+        return stats
+
     def get_uids(self, llm_id: int) -> list[int]:
         """Return all unique UIDs (context + response) for a given LLM.
 
@@ -638,10 +697,49 @@ class InteractionTracker:
         print(f"Saved interaction plot to {path}")
 
 
+def _normalize_usage(usage) -> Optional[dict]:
+    """Normalize usage object to dict format.
+
+    Accepts:
+        - None: returns None
+        - dict: returns as-is
+        - Pydantic model (e.g., CompletionUsage): converts via model_dump()
+        - Object with attributes: extracts completion_tokens, prompt_tokens, total_tokens
+
+    Returns:
+        Normalized dict with token counts, or None.
+    """
+    if usage is None:
+        return None
+
+    if isinstance(usage, dict):
+        return usage
+
+    # Pydantic model (OpenAI CompletionUsage)
+    if hasattr(usage, "model_dump"):
+        return usage.model_dump()
+
+    # Fallback: extract attributes manually
+    result = {}
+    for key in ["completion_tokens", "prompt_tokens", "total_tokens"]:
+        if hasattr(usage, key):
+            result[key] = getattr(usage, key)
+
+    if hasattr(usage, "prompt_tokens_details") and usage.prompt_tokens_details:
+        details = usage.prompt_tokens_details
+        if hasattr(details, "model_dump"):
+            result["prompt_tokens_details"] = details.model_dump()
+        elif hasattr(details, "cached_tokens"):
+            result["prompt_tokens_details"] = {"cached_tokens": details.cached_tokens}
+
+    return result if result else None
+
+
 def record_interaction(
     tracker: Optional[InteractionTracker],
     messages: list[dict],
     llm_id: int = 0,
+    usage=None,
 ) -> Optional[int]:
     """Record an interaction if tracker is provided.
 
@@ -653,12 +751,15 @@ def record_interaction(
         tracker: InteractionTracker instance or None (no-op if None)
         messages: List of message dicts with 'role' and 'content' keys
         llm_id: Identifier for the LLM
+        usage: Token usage - accepts CompletionUsage object, dict, or None
 
     Returns:
         interaction_id if tracked, None if tracker is None
     """
     if tracker is None:
         return None
+
+    usage = _normalize_usage(usage)
 
     clean_messages = []
     for msg in messages:
@@ -685,7 +786,7 @@ def record_interaction(
 
         clean_messages.append(clean_msg)
 
-    return tracker.record(clean_messages, llm_id=llm_id)
+    return tracker.record(clean_messages, llm_id=llm_id, usage=usage)
 
 
 @dataclass

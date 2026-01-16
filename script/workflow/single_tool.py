@@ -2,7 +2,7 @@
 
 import os
 import json
-from typing import List, Dict, Any, Optional
+from typing import List, Optional
 from transformers import AutoTokenizer
 from dotenv import find_dotenv, load_dotenv
 
@@ -12,38 +12,9 @@ from camel.toolkits import FunctionTool
 
 from rosetta.workflow.track import InteractionTracker, record_interaction
 from rosetta.workflow.retriever import search_engine
+from rosetta.workflow.basic_utils import msg_system, msg_user, msg_assistant, msg_tool, execute_tool
 
 load_dotenv(find_dotenv())
-
-def msg_system(content: str) -> Dict[str, Any]:
-    return {"role": "system", "content": content}
-
-def msg_user(content: str) -> Dict[str, Any]:
-    return {"role": "user", "content": content}
-
-def msg_assistant(content: str, tool_call=None) -> Dict[str, Any]:
-    msg = {"role": "assistant", "content": content or ""}
-    if tool_call:
-        msg["tool_calls"] = [{
-            "id": tool_call.id,
-            "type": "function",
-            "function": {"name": tool_call.function.name, "arguments": tool_call.function.arguments},
-        }]
-    return msg
-
-def msg_tool(tool_call_id: str, content: str) -> Dict[str, Any]:
-    return {"role": "tool", "tool_call_id": tool_call_id, "content": content}
-
-def execute_tool(tool_map: Dict, name: str, args: Dict) -> str:
-    tool = tool_map.get(name)
-    if tool is None:
-        return f"Error: Unknown tool '{name}'"
-    try:
-        result = tool.func(**args)
-        return result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
-    except Exception as e:
-        return f"Error: {e}"
-
 
 def run_with_tools(
     question: str,
@@ -69,7 +40,7 @@ def run_with_tools(
         tool_call = assistant_msg.tool_calls[0] if assistant_msg.tool_calls else None
 
         messages.append(msg_assistant(assistant_msg.content, tool_call))
-        record_interaction(tracker, messages, llm_id=0)
+        record_interaction(tracker, messages, llm_id=0, usage=response.usage)
 
         if not tool_call:
             return assistant_msg.content or ""
@@ -110,3 +81,6 @@ if __name__ == "__main__":
     print("\n" + "=" * 50)
     print("Chat History:")
     print(tracker.get_message_text(llm_id=0))
+    print("\n" + "=" * 50)
+    print("Tracker Summary:")
+    print(tracker)
