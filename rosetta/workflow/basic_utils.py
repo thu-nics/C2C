@@ -1,5 +1,5 @@
 import json
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 def msg_system(content: str) -> Dict[str, Any]:
     return {"role": "system", "content": content}
@@ -29,3 +29,7 @@ def execute_tool(tool_map: Dict, name: str, args: Dict) -> str:
         return result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
     except Exception as e:
         return f"Error: {e}"
+
+def _clean_for_api(messages: List[dict]) -> List[dict]:
+    """Remove internal keys (starting with _) before sending to API."""
+    return [{k: v for k, v in m.items() if not k.startswith("_")} for m in messages]

@@ -23,6 +23,9 @@ from rosetta.workflow.prompt import (
     LLM_JUDGE_SYSTEM,
     LLM_JUDGE_PROMPT,
 )
+from rosetta.workflow.singletool import run_with_tools
+from rosetta.workflow.contextManage import ContextManager
+from transformers import AutoTokenizer
 
 if TYPE_CHECKING:
     from camel.agents import ChatAgent
@@ -158,6 +161,7 @@ def run_research(
     state_rule_actions: Optional[List[str]] = None,
     main_agent_tools: Optional[List["FunctionTool"]] = None,
     step_timeout: Optional[float] = None,
+    tokenizer: Optional[object] = None,
 ) -> Tuple[str, Optional["InteractionTracker"]]:
     """Dispatch to the requested research workflow."""
     mode = mode.lower()
@@ -238,6 +242,20 @@ def run_research(
             worker_tools=worker_tools,
             max_rounds=max_rounds,
             show_status=show_status,
+        )
+    if mode == "singletool":
+        if tokenizer is None:
+            tokenizer = AutoTokenizer.from_pretrained(str(main_model.model_type))
+        ctx_manager = None
+        ctx_manager = ContextManager(main_model, tokenizer=tokenizer)
+
+        return run_with_tools(
+            question=question,
+            model=main_model,
+            tools=main_agent_tools or [],
+            tracker=tracker,
+            max_iterations=max_rounds,
+            ctx_manager=ctx_manager,
         )
     raise ValueError(f"Unsupported mode: {mode}")
 

@@ -1,7 +1,119 @@
 from typing import Optional, List
 from contextlib import contextmanager
-from rich.console import Console
+from rich.console import Console, Group
 from rich.markup import escape
+from rich.panel import Panel
+from rich.text import Text
+from rich.live import Live
+
+
+class ConvLogger:
+    """Live conversation display that updates in place."""
+
+    _ROLE_STYLES = {
+        "system": ("bold magenta", "System"),
+        "user": ("bold green", "User"),
+        "assistant": ("bold blue", "Assistant"),
+        "tool": ("bold yellow", "Tool"),
+    }
+
+    def __init__(self, tokenizer=None, enabled: bool = True, max_content_len: int = 300):
+        self.console = Console() if enabled else None
+        self.tokenizer = tokenizer
+        self.max_content_len = max_content_len
+        self._live: Optional[Live] = None
+        self._last_messages: List[dict] = []
+
+    def _count_tokens(self, text: str) -> int:
+        """Count tokens in text using tokenizer, or estimate by chars."""
+        if not text:
+            return 0
+        if self.tokenizer:
+            return len(self.tokenizer.encode(text, add_special_tokens=False))
+        return len(text) // 4  # Rough estimate
+
+    def _shorten(self, text: Optional[str]) -> str:
+        if not text:
+            return "[dim](empty)[/dim]"
+        s = " ".join(text.strip().split())
+        if len(s) > self.max_content_len:
+            return escape(s[: self.max_content_len - 1]) + "[dim]…[/dim]"
+        return escape(s)
+
+    def _format_message(self, msg: dict, idx: int) -> Text:
+        """Format a single message as Rich Text."""
+        role = msg.get("role", "unknown")
+        content = msg.get("content", "")
+        style, label = self._ROLE_STYLES.get(role, ("white", role.capitalize()))
+
+        # Count tokens
+        token_count = self._count_tokens(content)
+        lines = [f"[{style}][{idx}] {label}[/{style}] [dim]| {token_count} tokens[/dim]"]
+
+        # Show content
+        if content:
+            lines.append(f"  {self._shorten(content)}")
+
+        # Show tool calls for assistant
+        if msg.get("tool_calls"):
+            for tc in msg["tool_calls"]:
+                fn = tc.get("function", {})
+                name = fn.get("name", "?")
+                args = fn.get("arguments", "")
+                if len(args) > 80:
+                    args = args[:77] + "..."
+                lines.append(f"  [dim]→ {name}({args})[/dim]")
+
+        # Show tool_call_id for tool messages
+        if msg.get("tool_call_id"):
+            lines.append(f"  [dim]tool_call_id: {msg['tool_call_id'][:20]}...[/dim]")
+
+        return Text.from_markup("\n".join(lines))
+
+    def _render_all(self, messages: List[dict]) -> Group:
+        """Render all messages as a Rich Group."""
+        renderables = []
+        for i, msg in enumerate(messages):
+            renderables.append(self._format_message(msg, i))
+        return Group(*renderables)
+
+    def start(self) -> None:
+        """Start live display mode."""
+        if self.console and self._live is None:
+            self._live = Live(console=self.console, refresh_per_second=4)
+            self._live.start()
+
+    def stop(self) -> None:
+        """Stop live display mode (final state remains visible)."""
+        if self._live:
+            self._live.stop()
+            self._live = None
+
+    def update(self, messages: List[dict]) -> None:
+        """Update display with current messages (clears old, prints new in place)."""
+        if not self.console:
+            return
+
+        self._last_messages = list(messages)
+
+        if self._live:
+            # Live mode: update in place
+            self._live.update(self._render_all(messages))
+        else:
+            # Non-live mode: just print all
+            self.print_all(messages)
+
+    def reset(self) -> None:
+        """Reset state."""
+        self._last_messages = []
+
+    def print_all(self, messages: List[dict]) -> None:
+        """Print all messages (non-live, permanent output)."""
+        if not self.console:
+            return
+        for i, msg in enumerate(messages):
+            self.console.print(self._format_message(msg, i))
+
 
 class StatusLogger:
     """Handles console status display with spinner and history."""

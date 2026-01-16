@@ -53,6 +53,7 @@ class EvalRecord:
     tools_used: Optional[list[list[str]]] = None
     state_sequence: Optional[list[str]] = None
     error: Optional[str] = None
+    usage: Optional[dict[str, Any]] = None
 
 
 @dataclass
@@ -153,11 +154,12 @@ def evaluate_single(
     gold = ex["answer"]
 
     use_single = config.mode == "single"
+    use_singletool = config.mode == "singletool"
     use_tree = config.mode in ("tree", "tool")
 
     tracker = InteractionTracker(tokenizer=tokenizer)
     tree_tracker = TreeTracker() if use_tree else None
-    context_plan = create_context_plan(config, use_single, use_tree)
+    context_plan = create_context_plan(config, use_single or use_singletool, use_tree)
 
     t0 = time.time()
     pred_raw = ""
@@ -171,10 +173,10 @@ def evaluate_single(
             mode=config.mode,
             question=question,
             main_model=model,
-            search_model=search_model if not use_single else None,
-            think_model=think_model if not use_single else None,
+            search_model=search_model if not (use_single or use_singletool) else None,
+            think_model=think_model if not (use_single or use_singletool) else None,
             tracker=tracker,
-            search_tools=tools if not use_single else None,
+            search_tools=tools if not (use_single or use_singletool) else None,
             context_plan=context_plan,
             show_status=False,
             max_rounds=config.max_rounds,
@@ -184,8 +186,9 @@ def evaluate_single(
             worker_tools=tools if use_tree else None,
             tree_tracker=tree_tracker,
             state_rule_actions=config.state_rule if use_tree else None,
-            main_agent_tools=tools if use_single else None,
+            main_agent_tools=tools if (use_single or use_singletool) else None,
             step_timeout=config.step_timeout,
+            tokenizer=tokenizer,
         )
         if use_tree and tracker is not None:
             state_sequence = tracker.state_sequence
@@ -209,6 +212,9 @@ def evaluate_single(
         except Exception:
             tools_used_per_round = None
 
+    # Get usage stats from tracker
+    usage = tracker.usage if tracker is not None else None
+
     return EvalRecord(
         idx=idx,
         example_id=example_id,
@@ -222,6 +228,7 @@ def evaluate_single(
         tools_used=tools_used_per_round,
         state_sequence=state_sequence,
         error=err,
+        usage=usage,
     )
 
 
@@ -403,7 +410,7 @@ def write_output_files(jsonl_path: Path, output_path: Path, output_format: str) 
     csv_path = output_path.with_suffix(".csv")
     csv_fields = ["idx", "example_id", "question", "gold_answer", "pred_answer", "pred_raw",
                   "correct_em", "correct_llm", "judge_confidence", "judge_reason",
-                  "error_category", "tools_used", "state_sequence", "seconds", "error"]
+                  "error_category", "tools_used", "state_sequence", "seconds", "error", "usage"]
 
     with jsonl_path.open("r", encoding="utf-8") as fin, csv_path.open("w", encoding="utf-8", newline="") as fout:
         writer = csv.DictWriter(fout, fieldnames=csv_fields)
@@ -415,11 +422,13 @@ def write_output_files(jsonl_path: Path, output_path: Path, output_format: str) 
             try:
                 obj = json.loads(line)
                 row = {k: obj.get(k) for k in csv_fields}
-                # Convert list fields to JSON strings for CSV
+                # Convert list/dict fields to JSON strings for CSV
                 if row.get("tools_used") is not None:
                     row["tools_used"] = json.dumps(row["tools_used"])
                 if row.get("state_sequence") is not None:
                     row["state_sequence"] = json.dumps(row["state_sequence"])
+                if row.get("usage") is not None:
+                    row["usage"] = json.dumps(row["usage"])
                 writer.writerow(row)
             except json.JSONDecodeError:
                 continue
@@ -529,7 +538,7 @@ def main() -> None:
     parser.add_argument("--model-provider", default="local", choices=["local", "openai", "gemini", "fireworks"],
                         help="Model provider: local (OpenAI-compatible), openai, or gemini")
     parser.add_argument("--tokenizer", default="Qwen/Qwen3-32B")
-    parser.add_argument("--mode", default="oneflow", choices=["oneflow", "single", "tree", "tool"])
+    parser.add_argument("--mode", default="oneflow", choices=["oneflow", "single", "tree", "tool", "singletool"])
     parser.add_argument("--main_to_search", type=str, default="none", choices=["all", "initial", "none"])
     parser.add_argument("--search", type=str, default="none", choices=["all", "initial", "none"])
     parser.add_argument("--search_to_main", type=str, default="qr", choices=["all", "qr"])

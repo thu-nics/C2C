@@ -609,6 +609,15 @@ class InteractionTracker:
 
         return stats
 
+    @property
+    def usage(self) -> dict:
+        """Total token usage across all interactions.
+
+        Returns:
+            Dict with 'completion_tokens', 'prompt_tokens', 'total_tokens', 'cached_tokens', 'num_interactions'.
+        """
+        return self.get_usage_stats()
+
     def get_uids(self, llm_id: int) -> list[int]:
         """Return all unique UIDs (context + response) for a given LLM.
 

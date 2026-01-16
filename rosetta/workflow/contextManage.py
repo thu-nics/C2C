@@ -1,106 +1,11 @@
 """Context management utilities for compressing conversation history."""
 
-from typing import List, Dict
+import hashlib
+from dataclasses import dataclass, field
+from typing import List, Dict, Optional
 from camel.models import BaseModelBackend
 
-
-SUMMARIZE_PROMPT = """Summarize this 2-message exchange while preserving all useful information.
-Keep the same roles and format, but make the content more concise.
-
-Examples:
-
-Input:
-Role: assistant
-Content: [Tool call: search_wiki] {{"entity": "Tokyo"}}
-Role: tool
-Content: Tokyo is the capital of Japan with a population of approximately 13.96 million as of 2024. The Greater Tokyo Area has over 37 million people, making it the most populous metropolitan area in the world.
-
-Output:
-Role: assistant
-Content: Searching Wikipedia for Tokyo.
-Role: tool
-Content: Tokyo is Japan's capital with 13.96 million people (2024). Greater Tokyo Area has 37+ million.
-
-Input:
-Role: assistant
-Content: [Tool call: search_google] {{"query": "Badly Drawn Boy instruments"}}
-Role: tool
-Content: Damon Gough, known as Badly Drawn Boy, is an English singer-songwriter and multi-instrumentalist who plays guitar, keyboards, drums and various other instruments on his recordings.
-
-Output:
-Role: assistant
-Content: Searching Google for Badly Drawn Boy instruments.
-Role: tool
-Content: Badly Drawn Boy (Damon Gough) is a multi-instrumentalist who plays guitar, keyboards, drums and more.
-
-Now summarize this exchange:
-
-Role: {role1}
-Content: {content1}
-Role: {role2}
-Content: {content2}
-
-Output the summarized messages in the exact format:
-Role: {role1}
-Content: <summarized content>
-Role: {role2}
-Content: <summarized content>"""
-
-
-CONTRACT_PROMPT = """Merge these 4 messages (2 rounds) into 2 messages (1 round).
-Show the starting intent and final result, hiding intermediate steps.
-
-Examples:
-
-Input:
-Role: user
-Content: Find out who directed the movie Inception and what other famous movies they directed.
-Role: assistant
-Content: I'll search for the director of Inception first.
-Role: user
-Content: Now find their other movies.
-Role: assistant
-Content: Christopher Nolan directed Inception. He also directed The Dark Knight trilogy, Interstellar, Dunkirk, Tenet, and Oppenheimer.
-
-Output:
-Role: user
-Content: Find out who directed Inception and what other famous movies they directed.
-Role: assistant
-Content: Christopher Nolan directed Inception. He also directed The Dark Knight trilogy, Interstellar, Dunkirk, Tenet, and Oppenheimer.
-
-Input:
-Role: user
-Content: What's the capital of France?
-Role: assistant
-Content: The capital of France is Paris.
-Role: user
-Content: What's its population?
-Role: assistant
-Content: Paris has a population of approximately 2.1 million in the city proper, and over 12 million in the metropolitan area.
-
-Output:
-Role: user
-Content: What's the capital of France and its population?
-Role: assistant
-Content: The capital of France is Paris, with approximately 2.1 million people in the city proper and over 12 million in the metropolitan area.
-
-Now merge these 4 messages:
-
-Role: {role1}
-Content: {content1}
-Role: {role2}
-Content: {content2}
-Role: {role3}
-Content: {content3}
-Role: {role4}
-Content: {content4}
-
-Output exactly 2 messages:
-Role: {role1}
-Content: <merged content>
-Role: {role4}
-Content: <merged content>"""
-
+from rosetta.workflow.context_prompt import SUMMARIZE_PROMPT, SUMMARIZE_TOOL_RESP_PROMPT, CONTRACT_PROMPT
 
 def _get_content(msg: Dict) -> str:
     """Extract content from message, converting tool_calls to text if needed."""
@@ -116,6 +21,47 @@ def _get_content(msg: Dict) -> str:
         args = func.get("arguments", "{}")
         return f"[Tool call: {name}] {args}"
     return ""
+
+
+def _extract_tool_call(msg: Dict) -> Optional[str]:
+    """Extract tool call as string from assistant message."""
+    tool_calls = msg.get("tool_calls", [])
+    if not tool_calls:
+        return None
+    tc = tool_calls[0]
+    func = tc.get("function", {})
+    name = func.get("name", "unknown")
+    args = func.get("arguments", "{}")
+    return f"{name}({args})"
+
+
+def _is_tool_message(msg: Dict) -> bool:
+    """Check if message is a tool response."""
+    return msg.get("role") == "tool" or "tool_call_id" in msg
+
+
+def inject_call_context(messages: List[Dict]) -> List[Dict]:
+    """Inject _call key into tool messages from their preceding assistant message.
+
+    For each tool message, if there's a preceding assistant message with tool_calls,
+    extract the call info and store it in the tool message's _call key.
+
+    Args:
+        messages: List of message dicts.
+
+    Returns:
+        Same list with _call keys injected (modifies in place and returns).
+    """
+    for i, msg in enumerate(messages):
+        if _is_tool_message(msg) and "_call" not in msg:
+            # Look for preceding assistant message with tool_calls
+            if i > 0:
+                prev = messages[i - 1]
+                if prev.get("role") == "assistant":
+                    call_str = _extract_tool_call(prev)
+                    if call_str:
+                        msg["_call"] = call_str
+    return messages
 
 
 def _parse_output(text: str, roles: List[str]) -> List[Dict[str, str]]:
@@ -155,7 +101,7 @@ def _parse_output(text: str, roles: List[str]) -> List[Dict[str, str]]:
     return messages
 
 
-def summarize(
+def summarize_round(
     messages: List[Dict[str, str]],
     model: BaseModelBackend,
 ) -> List[Dict[str, str]]:
@@ -168,7 +114,7 @@ def summarize(
     Returns:
         List of 2 summarized message dicts with same roles.
     """
-    assert len(messages) == 2, "summarize requires exactly 2 messages"
+    assert len(messages) == 2, "summarize_round requires exactly 2 messages"
 
     prompt = SUMMARIZE_PROMPT.format(
         role1=messages[0]["role"],
@@ -183,6 +129,65 @@ def summarize(
     ])
     roles = [messages[0]["role"], messages[1]["role"]]
     return _parse_output(response.choices[0].message.content, roles)
+
+def summarize_tool_resp(
+    messages: List[Dict[str, str]],
+    model: BaseModelBackend,
+) -> List[Dict[str, str]]:
+    """Summarize tool response(s), keeping other messages unchanged.
+
+    Auto-detects which messages are tool responses and summarizes only those.
+    Uses _call context (if present) to filter irrelevant results.
+
+    Args:
+        messages: List of message dicts (can be any length).
+        model: CAMEL model backend for summarization.
+
+    Returns:
+        List of message dicts with tool responses summarized, others unchanged.
+    """
+    result = []
+    for msg in messages:
+        if not _is_tool_message(msg):
+            # Keep non-tool messages unchanged
+            result.append(dict(msg))
+            continue
+
+        tool_content = msg.get("content", "")
+        if not tool_content or len(tool_content) < 100:
+            # Skip summarization for short responses
+            result.append(dict(msg))
+            continue
+
+        # Get call context if available
+        call_context = msg.get("_call", "unknown")
+
+        prompt = SUMMARIZE_TOOL_RESP_PROMPT.format(
+            tool_call=call_context,
+            tool_content=tool_content
+        )
+
+        response = model.run([
+            {"role": "system", "content": "You summarize tool responses concisely, keeping only information relevant to the query. Output only the summarized content."},
+            {"role": "user", "content": prompt},
+        ])
+
+        summarized_content = response.choices[0].message.content.strip()
+
+        # Build result message, preserving special keys
+        result_msg = {"role": msg.get("role", "tool"), "content": summarized_content}
+        if "tool_call_id" in msg:
+            result_msg["tool_call_id"] = msg["tool_call_id"]
+        if "_call" in msg:
+            result_msg["_call"] = msg["_call"]
+
+        result.append(result_msg)
+
+    return result
+
+
+# Backward compatibility alias
+summarize_response = summarize_tool_resp
 
 
 def contract(
@@ -217,3 +222,188 @@ def contract(
     ])
     roles = [messages[0]["role"], messages[3]["role"]]
     return _parse_output(response.choices[0].message.content, roles)
+
+@dataclass
+class ContextNode:
+    """A node in the context tree representing a round of messages."""
+
+    idx: int
+    hash: str
+    messages: List[Dict]
+    source: str  # "original", "summarize", etc.
+    token_count: int = 0
+    parent_hashes: List[str] = field(default_factory=list)
+
+    def __str__(self) -> str:
+        """Detailed string representation of the node."""
+        lines = [f"ContextNode[{self.idx}] ({self.source}, {self.token_count} tokens)"]
+        lines.append(f"  hash: {self.hash}")
+        if self.parent_hashes:
+            lines.append(f"  parents: {self.parent_hashes}")
+        lines.append("  messages:")
+        for msg in self.messages:
+            role = msg.get("role", "?")
+            content = msg.get("content", "")
+            preview = content[:80] + "..." if len(content) > 80 else content
+            preview = " ".join(preview.split())  # Normalize whitespace
+            lines.append(f"    [{role}] {preview}")
+        return "\n".join(lines)
+
+    def short(self, highlight: bool = False) -> str:
+        """Short representation: [idx:tokens]."""
+        if highlight:
+            return f"\033[93m[{self.idx}:{self.token_count}]\033[0m"
+        return f"[{self.idx}:{self.token_count}]"
+
+
+class ContextManager:
+    """Manages context compression with tree-based provenance tracking.
+
+    Tracks how messages transform through operations like summarization.
+    Nodes are rounds (2 messages), edges show transformations.
+    """
+
+    def __init__(self, model: BaseModelBackend, tokenizer=None):
+        self.model = model
+        self.tokenizer = tokenizer
+        self._nodes: Dict[str, ContextNode] = {}  # hash -> ContextNode
+        self._node_list: List[ContextNode] = []  # For index-based access
+        self._edges: List[tuple] = []  # (src_hashes, dst_hash, op_name)
+        self._last_input_hashes: List[str] = []  # Track last apply inputs
+
+    @property
+    def nodes(self) -> List[ContextNode]:
+        """Access nodes by index: ctx_manager.nodes[0]."""
+        return self._node_list
+
+    def _count_tokens(self, messages: List[Dict]) -> int:
+        """Count tokens in messages."""
+        text = " ".join(m.get("content", "") for m in messages)
+        if self.tokenizer:
+            return len(self.tokenizer.encode(text, add_special_tokens=False))
+        return len(text) // 4  # Rough estimate
+
+    @staticmethod
+    def _hash(messages: List[Dict]) -> str:
+        """Hash messages to create node ID."""
+        parts = [f"{m.get('role', '')}:{m.get('content', '')}" for m in messages]
+        return hashlib.md5("||".join(parts).encode()).hexdigest()[:12]
+
+    def _register(self, messages: List[Dict], source: str = "original", parents: List[str] = None) -> str:
+        """Register messages as a node, return hash."""
+        h = self._hash(messages)
+        if h not in self._nodes:
+            node = ContextNode(
+                idx=len(self._node_list),
+                hash=h,
+                messages=list(messages),
+                source=source,
+                token_count=self._count_tokens(messages),
+                parent_hashes=parents or [],
+            )
+            self._nodes[h] = node
+            self._node_list.append(node)
+        return h
+
+    def apply(self, messages: List[Dict], dry_run: bool = False) -> List[Dict]:
+        """Apply context management, return updated messages.
+
+        Injects _call context into tool messages and summarizes the last round.
+
+        Args:
+            messages: List of message dicts.
+            dry_run: If True, only record nodes without modifying messages.
+
+        Returns:
+            Updated messages (unchanged if dry_run=True).
+        """
+        if len(messages) < 4:  # Need system + user + at least one round
+            return messages
+
+        # Inject _call context into tool messages
+        inject_call_context(messages)
+
+        # Find all existing nodes that correspond to current messages (for highlighting)
+        # Each consecutive pair in messages may match an existing node
+        self._last_input_hashes = []
+        for i in range(1, len(messages) - 1):
+            pair_hash = self._hash(messages[i:i+2])
+            if pair_hash in self._nodes:
+                self._last_input_hashes.append(pair_hash)
+
+        # Register source round (last 2 messages)
+        last_two = messages[-2:]
+        src_hash = self._register(last_two, "original")
+        if src_hash not in self._last_input_hashes:
+            self._last_input_hashes.append(src_hash)
+
+        # In dry_run mode, just record without modifying
+        if dry_run:
+            return messages
+
+        # Skip if already summarized (detected by hash)
+        if self._nodes[src_hash].source != "original":
+            return messages
+
+        # Summarize
+        summarized = summarize_tool_resp(last_two, self.model)
+        dst_hash = self._register(summarized, "summarize", parents=[src_hash])
+
+        # Record edge
+        self._edges.append(([src_hash], dst_hash, "summarize"))
+
+        return messages[:-2] + summarized
+
+    def __str__(self) -> str:
+        """Tree visualization with [idx:tokens] format."""
+        if not self._node_list:
+            return "ContextManager: empty"
+
+        lines = ["Context Tree", "=" * 40]
+
+        # Build parent -> children map
+        children: Dict[str, List[str]] = {}
+        roots = []
+        for node in self._node_list:
+            if not node.parent_hashes:
+                roots.append(node.hash)
+            for ph in node.parent_hashes:
+                children.setdefault(ph, []).append(node.hash)
+
+        # Render tree
+        def render(h: str, prefix: str = "", is_last: bool = True) -> List[str]:
+            node = self._nodes[h]
+            highlight = h in self._last_input_hashes
+            connector = "└── " if is_last else "├── "
+            node_str = node.short(highlight=highlight)
+            src_label = f" ({node.source})" if node.source != "original" else ""
+            result = [f"{prefix}{connector}{node_str}{src_label}"]
+
+            child_hashes = children.get(h, [])
+            child_prefix = prefix + ("    " if is_last else "│   ")
+            for i, ch in enumerate(child_hashes):
+                result.extend(render(ch, child_prefix, i == len(child_hashes) - 1))
+            return result
+
+        for i, root in enumerate(roots):
+            lines.extend(render(root, "", i == len(roots) - 1))
+
+        lines.append("=" * 40)
+        total_tokens = sum(n.token_count for n in self._node_list)
+        lines.append(f"Nodes: {len(self._node_list)}, Total tokens: {total_tokens}")
+        lines.append("Legend: \033[93m[idx:tokens]\033[0m = last input")
+
+        return "\n".join(lines)
+
+    def __repr__(self) -> str:
+        return f"ContextManager(nodes={len(self._node_list)}, edges={len(self._edges)})"
+
+    def get_tree(self) -> Dict:
+        """Return tree structure for inspection."""
+        return {
+            "nodes": {h: {"messages": n.messages, "source": n.source, "tokens": n.token_count}
+                      for h, n in self._nodes.items()},
+            "edges": list(self._edges),
+        }
+
+
