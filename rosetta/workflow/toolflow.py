@@ -1,11 +1,13 @@
-"""Tree-based research workflow with rewind capability.
+"""Tool-based research workflow with function calling.
 
-Currently supported actions: execute, plan, think, answer
-Unsupported actions (raise NotImplementedError): parallel_execute, rewind, exam
+Uses external tools for action selection - the main agent calls a tool to indicate
+which action to take, and the tool arguments contain the action parameters.
+
+Supported actions: execute, plan, think, answer, continue, break
+Extended actions: parallel_execute, rewind, exam
 """
 
-import json
-from typing import Tuple, Optional, List, Any, Dict
+from typing import Tuple, Optional, List, Dict
 from camel.agents import ChatAgent
 from camel.models import BaseModelBackend
 from camel.toolkits import FunctionTool, SearchToolkit
@@ -15,12 +17,11 @@ from rosetta.workflow.actions import (
     ACTIONS,
     ActionClass,
     get_action_tools,
-    is_action_supported,
     StateResult,
     ExecuteAction,
     PlanAction,
     ThinkAction,
-    SubmitAction,
+    AnswerAction,
     ContinueAction,
     BreakAction,
     ContextData,
@@ -129,7 +130,7 @@ def do_tool_research(
     rewind_model: BaseModelBackend = None,
     exam_model: BaseModelBackend = None,
     think_model: BaseModelBackend = None,
-    state_rule_actions: Optional[List[str]] = ["execute", "parallel_execute", "plan", "think", "rewind", "submit", "exam"],
+    state_rule_actions: Optional[List[str]] = ["execute", "parallel_execute", "plan", "think", "rewind", "answer", "exam"],
     action_rule_enforcer: ActionRuleEnforcer = DEFAULT_ENFORCER,
     tracker: InteractionTracker = None,
     tree_tracker: TreeTracker = None,
@@ -137,12 +138,13 @@ def do_tool_research(
     max_rounds: int = 10,
     show_status: bool = True,
 ) -> Tuple[str, Optional[InteractionTracker]]:
-    """Tree-based research with external tool-based action selection.
+    """Tool-based research with external tool-based action selection.
 
     The main agent selects actions via external tools. Tool execution is handled
     externally in this function, not by the tools themselves.
 
-    Currently supported actions: execute, plan, think, answer
+    Supported actions: execute, plan, think, answer, continue, break
+    Extended actions: parallel_execute, rewind, exam
 
     Args:
         question: The question to answer.
@@ -225,10 +227,10 @@ def do_tool_research(
                 result = ExamAction.do(
                     exam_model, main_agent, ctx.stateResults_sequence, data.get("step", 0), question, tracker
                 )
-            elif next_state == "submit":
+            elif next_state == "answer":
                 answer = data.get("answer", "")
                 justification = data.get("justification", "")
-                result = SubmitAction.do(answer, justification)
+                result = AnswerAction.do(answer, justification)
 
             elif next_state == "break":
                 result = BreakAction.do()
@@ -261,8 +263,8 @@ def do_tool_research(
 
         state = next_state
 
-        # Exit if submit state
-        if next_state == "submit":
+        # Exit if answer state
+        if next_state == "answer":
             return result.feedback, tracker
         elif next_state == "break":
             break

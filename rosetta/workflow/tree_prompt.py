@@ -1,4 +1,181 @@
-"""Prompts for tree-based research workflow."""
+"""Prompts for tree-based research workflow.
+
+Action properties (format_template, tree_description, guidelines, with_param, parse)
+are now defined in the action classes themselves (actions.py, ext_actions.py).
+Use build_decision_prompt() and build_action_prompt() to construct prompts dynamically.
+"""
+
+from typing import List
+
+# Import action registry (populated by action class decorators)
+from rosetta.workflow.actions import ACTIONS
+
+# =============================================================================
+# PROMPT BUILDING UTILITIES
+# =============================================================================
+
+
+def build_decision_prompt(
+    action_names: List[str],
+    question_var: str = "{question}",
+    pending_var: str = "{pending_tasks}",
+    current_var: str = "{current_task}",
+    finished_var: str = "{finished_tasks}",
+    include_tasks: bool = True,
+    single_action: bool = False,
+) -> str:
+    """Build a decision prompt from action classes.
+
+    Args:
+        action_names: List of action names to include (e.g., ["execute", "plan", "answer"]).
+        question_var: Variable placeholder for question (default: "{question}").
+        pending_var: Variable placeholder for pending tasks.
+        current_var: Variable placeholder for current task.
+        finished_var: Variable placeholder for finished tasks.
+        include_tasks: Whether to include task sections (default: True).
+        single_action: If True, simplify prompt for single action (no "Choose ONE action").
+
+    Returns:
+        Formatted decision prompt string.
+
+    Raises:
+        ValueError: If an unknown action name is provided.
+    """
+    if single_action:
+        assert len(action_names) == 1, f"single_action=True requires exactly 1 action, got {len(action_names)}"
+
+    prompt_lines = []
+
+    if not single_action:
+        prompt_lines.extend([
+            "Decide the next action based on current progress.",
+            "",
+        ])
+
+    prompt_lines.extend([
+        f"Question: {question_var}",
+        "",
+    ])
+
+    if include_tasks:
+        prompt_lines.extend([
+            "Finished tasks:",
+            finished_var,
+            "",
+            "Current task:",
+            current_var,
+            "",
+            "Pending tasks:",
+            pending_var,
+            "",
+        ])
+
+    if single_action:
+        prompt_lines.extend([
+            "Provide the details in this format:",
+            ""
+        ])
+    else:
+        prompt_lines.extend([
+            "Choose ONE action and output only its block:",
+            ""
+        ])
+
+    # Add action options from action classes
+    for i, action_name in enumerate(action_names, 1):
+        if action_name not in ACTIONS:
+            raise ValueError(f"Unknown action: {action_name}")
+
+        action_cls = ACTIONS[action_name]
+        if single_action:
+            prompt_lines.append(action_cls.format_template)
+        else:
+            prompt_lines.append(f"{i}. {action_cls.tree_description}:")
+            prompt_lines.append(action_cls.format_template)
+        prompt_lines.append("")
+
+    # Collect all guidelines
+    all_guidelines = []
+    for action_name in action_names:
+        all_guidelines.extend(ACTIONS[action_name].guidelines)
+
+    if all_guidelines:
+        prompt_lines.append("Guidelines:")
+        for guideline in all_guidelines:
+            prompt_lines.append(f"- {guideline}")
+
+    return "\n".join(prompt_lines)
+
+
+def build_action_prompt(
+    action_names: List[str],
+    question: str,
+    pending_tasks: List[str],
+    current_task: List[str] = None,
+    finished_tasks: List[str] = None,
+    single_action: bool = False,
+) -> str:
+    """Build prompt with an explicit set of actions and task lists.
+
+    Args:
+        action_names: List of action names to include in the prompt.
+        question: Research question.
+        pending_tasks: Tasks not yet started.
+        current_task: The current in-progress task (typically 0 or 1 item).
+        finished_tasks: Tasks fully completed.
+        single_action: If True, simplify prompt for single action.
+
+    Returns:
+        Formatted decision prompt with task values filled in.
+    """
+    current_task = current_task or []
+    finished_tasks = finished_tasks or []
+    pending_str = "\n".join(f"- {t}" for t in pending_tasks) if pending_tasks else "(none)"
+    current_str = "\n".join(f"- {t}" for t in current_task) if current_task else "(none)"
+    finished_str = "\n".join(f"- {t}" for t in finished_tasks) if finished_tasks else "(none)"
+
+    prompt_template = build_decision_prompt(action_names, include_tasks=True, single_action=single_action)
+    return prompt_template.format(
+        question=question,
+        pending_tasks=pending_str,
+        current_task=current_str,
+        finished_tasks=finished_str,
+    )
+
+
+def parse_action_from_response(text: str) -> str:
+    """Extract action name from <action>...</action> format.
+
+    Args:
+        text: Response text containing action tag.
+
+    Returns:
+        Action name (lowercase) or "unknown" if not found.
+    """
+    import re
+    match = re.search(r"<action>(.*?)</action>", text, re.DOTALL)
+    return match.group(1).strip().lower() if match else "unknown"
+
+
+def parse_decision(text: str) -> tuple:
+    """Parse main agent response to determine next state.
+
+    Args:
+        text: Response text from main agent.
+
+    Returns:
+        Tuple of (action_name, data_dict).
+    """
+    action_name = parse_action_from_response(text)
+    if action_name in ACTIONS:
+        data = ACTIONS[action_name].parse(text)
+        return action_name, data
+    return "unknown", {}
+
+
+# =============================================================================
+# STATIC PROMPTS
+# =============================================================================
 
 INIT_PROMPT = """As a Task Decomposer Agent, your objective is to analyze the given task and decompose it into subtasks if the task requires multiple searches.
 
@@ -16,88 +193,6 @@ Each subtask should be concise, concrete, and achievable.
 Ensure that the task plan is created without asking any questions.
 Be specific and clear.
 """
-
-# Tree workflow actions - modular action definitions
-TREE_ACTIONS = {
-    "execute": {
-        "description": "Execute - work on the current task",
-        "format": """<action>execute</action>
-<task>Self-contained subtask with necessary context</task>""",
-        "guidelines": [
-            "[execute] In <task>, include all and only the context the subagent needs; assume it cannot see any prior conversation.",
-            "[execute] Include what was already found; focus only on the remaining information needed.",
-        ],
-        "with_param": True,
-    },
-    "plan": {
-        "description": "Plan tasks - replace current and pending tasks with a new task list",
-        "format": """<action>plan</action>
-<tasks>
-<task>Revised subtask 1</task>
-<task>Revised subtask 2</task>
-</tasks>""",
-        "guidelines": [
-            "[plan] Replaces all current and pending tasks with new tasks. Finished tasks are preserved.",
-            "[plan] You may split one subtask into multiple smaller subtasks when helpful.",
-            "[plan] Each subtask must be narrowly scoped, achievable within a few searches, and have a clear desired result.",
-            "[plan] For failed/partial tasks, change the approach rather than repeating the same task.",
-        ],
-        "with_param": True,
-    },
-    "exam": {
-        "description": "Exam - verify a previous step's result if it seems suspicious or critical",
-        "format": """<action>exam</action>
-<step>step_index to examine (1-indexed)</step>""",
-        "guidelines": [
-            "[exam] Use this action to verify a specific prior step when its result is suspicious, inconsistent, or high-impact.",
-            "[exam] Provide the 1-indexed <step> you want to re-check.",
-        ],
-        "with_param": True,
-    },
-    "think": {
-        "description": "Think - pause to reflect and get a concise assessment before choosing next action",
-        "format": """<action>think</action>""",
-        "guidelines": [
-            "[think] Use this action when the next operation is unclear and you need a brief assessment before proceeding.",
-        ],
-        "with_param": False,
-    },
-    "rewind": {
-        "description": "Rewind - backtrack when similar tasks fail repeatedly",
-        "format": """<action>rewind</action>""",
-        "guidelines": [
-            "[rewind] Use when similar tasks fail repeatedly (similar query variations, similar dead ends).",
-            "[rewind] Use when exploring the wrong entity or topic.",
-            "[rewind] After rewinding, switch to a different approach.",
-        ],
-        "with_param": False,
-    },
-    "answer": {
-        "description": "Answer - final response when you have enough verified information",
-        "format": """<action>answer</action>
-<answer>{{"justification":"1-2 short sentences", "answer":"final answer span"}}</answer>""",
-        "guidelines": [
-            "[answer] Use this action only when you have enough verified information to respond conclusively.",
-            "[answer] Keep the justification to 1–2 short sentences.",
-            "[answer] Put the final answer span in the \"answer\" field and the brief rationale in \"justification\".",
-        ],
-        "with_param": True,
-    },
-    "parallel_execute": {
-        "description": "Parallel Execute - work on multiple independent tasks simultaneously",
-        "format": """<action>parallel_execute</action>
-<tasks>
-<task>Self-contained subtask 1 with necessary context</task>
-<task>Self-contained subtask 2 with necessary context</task>
-</tasks>""",
-        "guidelines": [
-            "[parallel_execute] Use when multiple tasks are independent and can be executed concurrently.",
-            "[parallel_execute] Each <task> must be self-contained with all context needed; subagents cannot see prior conversation.",
-            "[parallel_execute] Results will be collected and presented as multi-round conversation records.",
-        ],
-        "with_param": True,
-    },
-}
 
 WORKER_PROMPT = """You are a helpful search agent. Given a subtask, complete it by either:
 - Searching the internet if external information is needed.

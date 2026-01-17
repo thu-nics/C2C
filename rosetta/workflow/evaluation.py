@@ -224,7 +224,7 @@ def run_research(
 
         action_rule_enforcer = ActionRuleEnforcer(
             ActionRule.require_initial_plan_or_think,
-            ActionRule.require_continue_before_submit,
+            ActionRule.require_continue_before_answer,
             ActionRule.break_on_consecutive_continue,
         )
 

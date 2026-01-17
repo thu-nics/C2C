@@ -1,11 +1,20 @@
-"""Action tools for tree-based research workflow.
+"""Action classes for workflow orchestration.
 
 Each action class contains:
 - interface: Static method that LLMs see as a tool. Docstring becomes tool description.
 - do: Static method that executes the action. Called externally with full context.
-- parse (optional): Static method for parsing action-specific responses.
+- display: Static method returning status description for UI.
+- update: Static method to update ContextData after action execution.
 
-Currently supported actions: execute, plan, think, answer
+Tree-flow specific (XML-based prompts):
+- format_template: XML format template string.
+- tree_description: Short description for tree prompts.
+- guidelines: Usage guidelines list.
+- with_param: Whether action requires parameter re-prompting in focused mode.
+- parse: Static method to extract action data from XML response.
+
+Supported actions: execute, plan, think, answer, continue, break
+Extended actions (ext_actions.py): parallel_execute, rewind, exam
 """
 
 import re
@@ -122,6 +131,7 @@ class StateResult:
 Context
 """
 
+
 class ContextData:
     """Data container for workflow state.
 
@@ -130,9 +140,25 @@ class ContextData:
 
     Task lifecycle:
         pending -> current (in_progress) -> finished
+
+    Attributes:
+        pending: Tasks not yet started.
+        current: Current task being worked on (0 or 1 item).
+        finished: Tasks fully completed.
+        history_records: Accumulated message records for agent memory sync.
+        round: Iteration counter (always increases).
+        step: Execution step counter (resets on rewind).
+        main_agent: Optional reference to main agent (for treeflow compatibility).
     """
 
-    def __init__(self):
+    def __init__(self, main_agent: "ChatAgent" = None):
+        """Initialize context data.
+
+        Args:
+            main_agent: Optional ChatAgent reference (used by treeflow for memory ops).
+        """
+        # Optional main agent reference (for treeflow)
+        self.main_agent = main_agent
         # Task lists
         self.pending: List[str] = []
         self.current: List[str] = []  # Current task (0 or 1 item)
@@ -148,6 +174,16 @@ class ContextData:
         self._step_to_round: Dict[int, int] = {}
 
     @property
+    def progress(self) -> int:
+        """Number of finished tasks."""
+        return len(self.finished)
+
+    @property
+    def total(self) -> int:
+        """Total number of tasks."""
+        return len(self.pending) + len(self.current) + len(self.finished)
+
+    @property
     def stateResults_sequence(self) -> List[StateResult]:
         """All state results in round order."""
         return [self._snapshots[r]["result"] for r in sorted(self._snapshots.keys())]
@@ -156,6 +192,17 @@ class ContextData:
     def action_sequence(self) -> List[str]:
         """All actions in round order."""
         return [self._snapshots[r]["action"] for r in sorted(self._snapshots.keys())]
+
+    # Aliases for treeflow compatibility
+    @property
+    def state_results(self) -> List[StateResult]:
+        """Alias for stateResults_sequence (treeflow compatibility)."""
+        return self.stateResults_sequence
+
+    @property
+    def state_sequence(self) -> List[str]:
+        """Alias for action_sequence (treeflow compatibility)."""
+        return self.action_sequence
 
     def snapshot(self, action: str, result: StateResult) -> None:
         """Snapshot AFTER action execution. Records full state and increments round."""
@@ -176,6 +223,28 @@ class ContextData:
         if not self.current and self.pending:
             self.current.append(self.pending.pop(0))
 
+    def get_snapshot(self, round_idx: int) -> Optional[dict]:
+        """Get snapshot for a specific round.
+
+        Args:
+            round_idx: Round index to retrieve.
+
+        Returns:
+            Snapshot dict or None if not found.
+        """
+        return self._snapshots.get(round_idx)
+
+    def get_round_for_step(self, step_idx: int) -> Optional[int]:
+        """Get round index for a given step.
+
+        Args:
+            step_idx: Step index to look up.
+
+        Returns:
+            Round index or None if not found.
+        """
+        return self._step_to_round.get(step_idx)
+
 """
 BASE ACTION CLASS
 """
@@ -192,11 +261,22 @@ class ActionClass(ABC):
     - display: Static method returning status description for UI.
     - update: Static method to update ContextData after action execution.
 
+    Tree-flow properties (for XML-based prompts):
+    - format_template: XML format template string.
+    - tree_description: Short description for tree prompts.
+    - guidelines: Usage guidelines list.
+    - with_param: Whether action requires parameter re-prompting in focused mode.
+    - parse: Static method to extract action data from XML response.
+
     Attributes:
         name: Action name (set by @register_action decorator).
     """
 
     name: str = ""  # Set by @register_action decorator
+
+    # =========================================================================
+    # Tool-flow interface (function calling)
+    # =========================================================================
 
     @staticmethod
     @abstractmethod
@@ -249,6 +329,34 @@ class ActionClass(ABC):
         ctx.history_records.extend(result.records)
         ctx.promote_task()
 
+    # =========================================================================
+    # Tree-flow properties (XML-based prompts)
+    # =========================================================================
+
+    format_template: str = ""
+    """XML format template for this action (used in tree prompts)."""
+
+    tree_description: str = ""
+    """Short description for tree-flow prompt building."""
+
+    guidelines: List[str] = []
+    """Usage guidelines for this action."""
+
+    with_param: bool = False
+    """Whether action requires parameter re-prompting in focused mode."""
+
+    @staticmethod
+    def parse(text: str) -> dict:
+        """Parse XML response to extract action-specific data.
+
+        Args:
+            text: Response text containing XML tags.
+
+        Returns:
+            Dict with extracted action parameters.
+        """
+        return {}
+
 
 """
 ACTION CLASSES
@@ -257,6 +365,25 @@ ACTION CLASSES
 @register_action("execute", supported=True)
 class ExecuteAction(ActionClass):
     """Execute a subtask using a worker agent."""
+
+    # Tree-flow properties
+    format_template = """<action>execute</action>
+<task>Self-contained subtask with necessary context</task>"""
+
+    tree_description = "Execute - work on the current task"
+
+    guidelines = [
+        "[execute] In <task>, include all and only the context the subagent needs; assume it cannot see any prior conversation.",
+        "[execute] Include what was already found; focus only on the remaining information needed.",
+    ]
+
+    with_param = True
+
+    @staticmethod
+    def parse(text: str) -> dict:
+        """Extract task from <task>...</task> format."""
+        match = re.search(r"<task>(.*?)</task>", text, re.DOTALL)
+        return {"task": match.group(1).strip() if match else ""}
 
     @staticmethod
     def _parse_status(text: str) -> tuple:
@@ -426,6 +553,30 @@ class ExecuteAction(ActionClass):
 class PlanAction(ActionClass):
     """Plan and update task list."""
 
+    # Tree-flow properties
+    format_template = """<action>plan</action>
+<tasks>
+<task>Revised subtask 1</task>
+<task>Revised subtask 2</task>
+</tasks>"""
+
+    tree_description = "Plan tasks - replace current and pending tasks with a new task list"
+
+    guidelines = [
+        "[plan] Replaces all current and pending tasks with new tasks. Finished tasks are preserved.",
+        "[plan] You may split one subtask into multiple smaller subtasks when helpful.",
+        "[plan] Each subtask must be narrowly scoped, achievable within a few searches, and have a clear desired result.",
+        "[plan] For failed/partial tasks, change the approach rather than repeating the same task.",
+    ]
+
+    with_param = True
+
+    @staticmethod
+    def parse(text: str) -> dict:
+        """Extract tasks from <tasks><task>...</task></tasks> format."""
+        matches = re.findall(r"<task>(.*?)</task>", text, re.DOTALL)
+        return {"tasks": [m.strip() for m in matches if m.strip()]}
+
     @staticmethod
     def display(data: dict) -> str:
         """Return status description for plan action."""
@@ -491,23 +642,43 @@ class PlanAction(ActionClass):
         ctx.pending = result.tasks if result.tasks else []
         ctx.promote_task()
 
-@register_action("submit", supported=True)
-class SubmitAction(ActionClass):
-    """Submit the final response."""
+@register_action("answer", supported=True)
+class AnswerAction(ActionClass):
+    """Provide final answer when sufficient information is gathered."""
+
+    # Tree-flow properties
+    format_template = """<action>answer</action>
+<answer>{{"justification":"1-2 short sentences", "answer":"final answer span"}}</answer>"""
+
+    tree_description = "Answer - final response when you have enough verified information"
+
+    guidelines = [
+        "[answer] Use this action only when you have enough verified information to respond conclusively.",
+        "[answer] Keep the justification to 1-2 short sentences.",
+        '[answer] Put the final answer span in the "answer" field and the brief rationale in "justification".',
+    ]
+
+    with_param = True
+
+    @staticmethod
+    def parse(text: str) -> dict:
+        """Extract answer from <answer>...</answer> format."""
+        match = re.search(r"<answer>(.*?)</answer>", text, re.DOTALL)
+        if match:
+            content = match.group(1).strip()
+            try:
+                return json.loads(content)
+            except json.JSONDecodeError:
+                return {"answer": content}
+        return {}
 
     @staticmethod
     def interface(answer: str, justification: str = "") -> dict:
         """Answer - final response when you have enough verified information.
 
-        Use this action only when you have enough verified information to respond conclusively.
-
-        Guidelines:
-        - Keep the justification to 1-2 short sentences.
-        - Put the final answer span in `answer` and the brief rationale in `justification`.
-
         Args:
             answer: Final answer span.
-            justification: 1-2 short sentences of rationale (optional).
+            justification: 1-2 short sentences of rationale.
 
         Returns:
             Dict with answer and justification echoed back.
@@ -516,7 +687,7 @@ class SubmitAction(ActionClass):
 
     @staticmethod
     def do(answer: str, justification: str = "") -> StateResult:
-        """Return the final answer (no execution needed).
+        """Return the final answer.
 
         Args:
             answer: The final answer.
@@ -525,16 +696,15 @@ class SubmitAction(ActionClass):
         Returns:
             StateResult with answer.
         """
-        
         payload = {"answer": answer, "justification": justification}
         payload_str = json.dumps(payload, ensure_ascii=False)
         return StateResult(
-            feedback=payload_str,
+            feedback=answer,
             records=[
                 {"role": "user", "content": "Based on the research above, answer the question."},
                 {"role": "assistant", "content": payload_str},
             ],
-            state="submit",
+            state="answer",
             kwargs=payload,
         )
 
@@ -617,8 +787,24 @@ class BreakAction(ActionClass):
 class ThinkAction(ActionClass):
     """Reflect on current status."""
 
+    # Tree-flow properties
+    format_template = """<action>think</action>"""
+
+    tree_description = "Think - pause to reflect and get a concise assessment before choosing next action"
+
+    guidelines = [
+        "[think] Use this action when the next operation is unclear and you need a brief assessment before proceeding.",
+    ]
+
+    with_param = False
+
     @staticmethod
-    def _parse(text: str) -> Optional[str]:
+    def parse(text: str) -> dict:
+        """Think action has no parameters to parse."""
+        return {}
+
+    @staticmethod
+    def _parse_thought(text: str) -> Optional[str]:
         """Extract thought summary from think response.
 
         Args:
@@ -677,7 +863,7 @@ class ThinkAction(ActionClass):
         response.msg.content
         record_interaction(tracker, think_agent.chat_history, llm_id=-2)
 
-        thought = ThinkAction._parse(response.msg.content) or response.msg.content
+        thought = ThinkAction._parse_thought(response.msg.content) or response.msg.content
         return StateResult(
             feedback=thought,
             records=[

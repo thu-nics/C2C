@@ -11,11 +11,11 @@ from rosetta.workflow.actions import StateResult
 
 class ActionRule:
     """Collection of rule functions as static methods.
-    
+
     Each rule takes (current_state, state_sequence, actions) and returns
     a filtered list of actions. Rules are composable via ActionRuleEnforcer.
     """
-    
+
     @staticmethod
     def require_initial_plan_or_think(
         current_state: str,
@@ -40,14 +40,14 @@ class ActionRule:
         return actions
 
     @staticmethod
-    def require_continue_before_submit(
+    def require_continue_before_answer(
         current_state: str,
         state_sequence: Optional[List[StateResult]],
         actions: List[str]
     ) -> List[str]:
-        """Submit only appears after continue."""
+        """Answer only appears after continue."""
         if not state_sequence or not any(r.state == "continue" for r in state_sequence):
-            return [a for a in actions if a != "submit"]
+            return [a for a in actions if a != "answer"]
         return actions
 
     @staticmethod
@@ -75,21 +75,21 @@ class ActionRule:
         return actions
 
     @staticmethod
-    def submit_after_continue(
+    def answer_after_continue(
         current_state: str,
         state_sequence: Optional[List[StateResult]],
         actions: List[str]
     ) -> List[str]:
-        """After continue, only keep the submit action."""
+        """After continue, only keep the answer action."""
         if state_sequence and state_sequence[-1].state == "continue":
-            filtered = [a for a in actions if a == "submit"]
+            filtered = [a for a in actions if a == "answer"]
             return filtered if filtered else actions
         return actions
 
 
 class ActionRuleEnforcer:
     """Chains multiple rule functions to filter available actions.
-    
+
     Example usage:
         enforcer = ActionRuleEnforcer(
             ActionRule.require_initial_plan_or_think,
@@ -97,29 +97,29 @@ class ActionRuleEnforcer:
         )
         available = enforcer.update_actions("initial", [], all_actions)
     """
-    
+
     def __init__(self, *rules: Callable):
         """Initialize with rule functions.
-        
+
         Args:
             *rules: Variable number of rule functions. Each function should
                     have signature (current_state, state_sequence, actions) -> actions.
         """
         self.rules = list(rules)
-    
+
     def update_actions(
-        self, 
-        current_state: str, 
-        state_sequence: Optional[List[StateResult]], 
+        self,
+        current_state: str,
+        state_sequence: Optional[List[StateResult]],
         full_actions: List[str]
     ) -> List[str]:
         """Apply all rules sequentially to filter available actions.
-        
+
         Args:
             current_state: Current workflow state.
             state_sequence: Full sequence of prior StateResult objects.
             full_actions: Full list of action names to filter from.
-            
+
         Returns:
             Filtered list of available action names.
         """
@@ -131,14 +131,24 @@ class ActionRuleEnforcer:
 
 # ============== Predefined Enforcers ==============
 
+# Default enforcer for toolflow (function calling based)
 DEFAULT_ENFORCER = ActionRuleEnforcer(
     ActionRule.require_initial_plan_or_think,
-    ActionRule.require_continue_before_submit,
+    ActionRule.require_continue_before_answer,
     ActionRule.break_on_consecutive_continue,
 )
 
+# Enforcer for treeflow (XML-based prompts)
+TREEFLOW_ENFORCER = ActionRuleEnforcer(
+    ActionRule.require_initial_plan_or_think,
+    ActionRule.require_plan_before_execute,
+    ActionRule.require_plan_after_rewind,
+)
+
+# Minimal enforcer - only requires initial plan or think
 MINIMAL_ENFORCER = ActionRuleEnforcer(
     ActionRule.require_initial_plan_or_think,
 )
 
+# No rules enforcer - allows all actions
 NO_RULES_ENFORCER = ActionRuleEnforcer()
