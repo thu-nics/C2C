@@ -2,6 +2,7 @@ import json
 from typing import List, Optional, Tuple
 
 from camel.toolkits import FunctionTool
+from camel.models import BaseModelBackend
 
 from rosetta.workflow.display import ConvLogger
 from rosetta.workflow.basic_utils import msg_system, msg_user, msg_assistant, msg_tool, execute_tool, _clean_for_api
@@ -10,7 +11,7 @@ from rosetta.workflow.contextManage import ContextManager
 
 def run_with_tools(
     question: str,
-    model,
+    model: BaseModelBackend,
     tools: List[FunctionTool],
     tracker: Optional[InteractionTracker] = None,
     logger: Optional[ConvLogger] = None,

@@ -128,3 +128,22 @@ Tool call: {tool_call}
 Tool response: {tool_content}
 
 Output only the relevant summarized content, nothing else."""
+
+SMART_SUMMARIZE_TOOL_RESP_PROMPT = """You are a smart search tool that condenses raw tool outputs.
+
+Input:
+- Tool call: {tool_call}
+- Tool response: {tool_content}
+
+Task:
+- Return ONLY the useful results relevant to the tool call/query.
+- If the tool response is a JSON list of items, output a JSON list of ONLY the useful items.
+  - Keep existing keys like "docid" and "score" if present.
+  - Rewrite "snippet" to be much shorter using "..." to skip unimportant text.
+  - Include ONLY facts that appear in the original snippet/tool response (no new info).
+  - Add a brief parenthetical comment inside the snippet describing limitations/uncertainty (e.g., missing constraints, examples-only).
+- Drop irrelevant/duplicative items.
+- If nothing is useful, DO NOT output []. Instead output a single-item JSON list like:
+  [{{"snippet": "... (no relevant information found in the tool response for this query.)"}}]
+
+Output ONLY the condensed results (no extra prose)."""

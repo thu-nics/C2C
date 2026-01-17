@@ -390,13 +390,57 @@ def run_llm_judge(jsonl_path: Path, config: EvalConfig, max_workers: int = 32) -
     return total_llm, correct_llm, category_counts
 
 
-def print_summary(total: int, correct_em: int, total_llm: int, correct_llm: int, category_counts: dict) -> None:
+def calculate_avg_usage(records: list[dict]) -> dict:
+    """Calculate average usage stats from records.
+    
+    Returns:
+        Dict with 'total', 'prompt', 'completion', 'cached' average values.
+    """
+    total_tokens_sum = 0
+    prompt_tokens_sum = 0
+    completion_tokens_sum = 0
+    cached_tokens_sum = 0
+    usage_count = 0
+    
+    for rec in records:
+        usage = rec.get("usage")
+        if usage:
+            total_tokens_sum += usage.get("total_tokens", 0)
+            prompt_tokens_sum += usage.get("prompt_tokens", 0)
+            completion_tokens_sum += usage.get("completion_tokens", 0)
+            cached_tokens_sum += usage.get("cached_tokens", 0)
+            usage_count += 1
+    
+    if usage_count == 0:
+        return {"total": 0, "prompt": 0, "completion": 0, "cached": 0}
+    
+    return {
+        "total": total_tokens_sum / usage_count,
+        "prompt": prompt_tokens_sum / usage_count,
+        "completion": completion_tokens_sum / usage_count,
+        "cached": cached_tokens_sum / usage_count,
+    }
+
+
+def print_summary(
+    total: int,
+    correct_em: int,
+    total_llm: int,
+    correct_llm: int,
+    category_counts: dict,
+    avg_usage: Optional[dict] = None,
+) -> None:
     """Print evaluation summary."""
     acc_em = (correct_em / total) if total else 0.0
     acc_llm = (correct_llm / total_llm) if total_llm else 0.0
     print(f"\nDone. evaluated={total}")
     print(f"  Exact Match: EM={correct_em} acc={acc_em:.3f}")
     print(f"  LLM Judge: correct={correct_llm} acc={acc_llm:.3f}")
+    if avg_usage:
+        print(f"\nAverage Usage per Question:")
+        print(f"  Total tokens: {avg_usage['total']:.1f}")
+        print(f"  Prompt tokens: {avg_usage['prompt']:.1f} (cached: {avg_usage['cached']:.1f})")
+        print(f"  Completion tokens: {avg_usage['completion']:.1f}")
     _print_error_table(category_counts)
 
 
@@ -623,9 +667,10 @@ def main() -> None:
         records = read_jsonl(jsonl_path)
         total = len(records)
         correct_em = sum(1 for r in records if r.get("correct_em", False))
+        avg_usage = calculate_avg_usage(records)
 
         write_output_files(jsonl_path, config.output, config.output_format)
-        print_summary(total, correct_em, total_llm, correct_llm, category_counts)
+        print_summary(total, correct_em, total_llm, correct_llm, category_counts, avg_usage)
         return
 
     process_dir = config.output.parent / "process"
@@ -768,6 +813,9 @@ def main() -> None:
     acc_llm = (correct_llm / total_llm) if total_llm else 0.0
     csv_path = config.output.with_suffix(".csv")
 
+    # Calculate average usage stats
+    avg_usage = calculate_avg_usage(merged_records)
+
     summary_lines = [
         "=" * 80,
         "EVALUATION SUMMARY",
@@ -777,6 +825,11 @@ def main() -> None:
         f"  LLM Eval: correct={correct_llm} acc={acc_llm:.3f}",
         f"Output: {config.output}",
         f"CSV: {csv_path}",
+        "",
+        "Average Usage per Question:",
+        f"  Total tokens: {avg_usage['total']:.1f}",
+        f"  Prompt tokens: {avg_usage['prompt']:.1f} (cached: {avg_usage['cached']:.1f})",
+        f"  Completion tokens: {avg_usage['completion']:.1f}",
         "",
         "Arguments:",
         f"  --dataset {config.dataset}",
@@ -860,7 +913,7 @@ def main() -> None:
     print(f"Output: {config.output}")
     print(f"CSV: {csv_path}")
     print(f"Summary: {summary_path}")
-    print_summary(total, correct_em, total_llm, correct_llm, category_counts)
+    print_summary(total, correct_em, total_llm, correct_llm, category_counts, avg_usage)
 
 
 if __name__ == "__main__":

@@ -17,10 +17,11 @@ class ConvLogger:
         "tool": ("bold yellow", "Tool"),
     }
 
-    def __init__(self, tokenizer=None, enabled: bool = True, max_content_len: int = 300):
+    def __init__(self, tokenizer=None, enabled: bool = True, max_content_len: int = 300, max_messages: int = 4):
         self.console = Console() if enabled else None
         self.tokenizer = tokenizer
         self.max_content_len = max_content_len
+        self.max_messages = max_messages
         self._live: Optional[Live] = None
         self._last_messages: List[dict] = []
 
@@ -73,7 +74,16 @@ class ConvLogger:
     def _render_all(self, messages: List[dict]) -> Group:
         """Render all messages as a Rich Group."""
         renderables = []
-        for i, msg in enumerate(messages):
+        
+        # Calculate total token count
+        total_tokens = sum(self._count_tokens(msg.get("content", "")) for msg in messages)
+        header = Text.from_markup(f"[bold cyan]Total Tokens: {total_tokens}[/bold cyan] [dim]| {len(messages)} messages[/dim]")
+        renderables.append(header)
+        
+        # Only show the latest N messages
+        display_messages = messages[-self.max_messages:] if len(messages) > self.max_messages else messages
+        start_idx = len(messages) - len(display_messages)
+        for i, msg in enumerate(display_messages, start=start_idx):
             renderables.append(self._format_message(msg, i))
         return Group(*renderables)
 
@@ -111,7 +121,16 @@ class ConvLogger:
         """Print all messages (non-live, permanent output)."""
         if not self.console:
             return
-        for i, msg in enumerate(messages):
+        
+        # Print total token count header
+        total_tokens = sum(self._count_tokens(msg.get("content", "")) for msg in messages)
+        header = Text.from_markup(f"[bold cyan]Total Tokens: {total_tokens}[/bold cyan] [dim]| {len(messages)} messages[/dim]")
+        self.console.print(header)
+        
+        # Only show the latest N messages
+        display_messages = messages[-self.max_messages:] if len(messages) > self.max_messages else messages
+        start_idx = len(messages) - len(display_messages)
+        for i, msg in enumerate(display_messages, start=start_idx):
             self.console.print(self._format_message(msg, i))
 
 

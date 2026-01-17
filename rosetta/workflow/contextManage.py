@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Optional
 from camel.models import BaseModelBackend
 
-from rosetta.workflow.context_prompt import SUMMARIZE_PROMPT, SUMMARIZE_TOOL_RESP_PROMPT, CONTRACT_PROMPT
+from rosetta.workflow.context_prompt import SUMMARIZE_PROMPT, SUMMARIZE_TOOL_RESP_PROMPT, CONTRACT_PROMPT, SMART_SUMMARIZE_TOOL_RESP_PROMPT
 
 def _get_content(msg: Dict) -> str:
     """Extract content from message, converting tool_calls to text if needed."""
@@ -162,7 +162,7 @@ def summarize_tool_resp(
         # Get call context if available
         call_context = msg.get("_call", "unknown")
 
-        prompt = SUMMARIZE_TOOL_RESP_PROMPT.format(
+        prompt = SMART_SUMMARIZE_TOOL_RESP_PROMPT.format(
             tool_call=call_context,
             tool_content=tool_content
         )

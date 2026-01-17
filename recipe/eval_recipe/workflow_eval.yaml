@@ -13,18 +13,29 @@ base:
   num_workers: 25
 
 runs:
-  - name: Qwen3_32b
-    mode: tool
+  # - name: Qwen3_32b
+  #   mode: tool
+  #   model_provider: local
+  #   model_type: Qwen/Qwen3-32B
+  #   tools:
+  #     - search_engine
+  #   dataset: hotpotqa
+  #   output: local/evaluation/qwen3_32b/tool_EPA/hotpotqa.json
+  #   state_rule:
+  #     - execute
+  #     - plan
+  #     - submit
+
+  - name: Qwen3_32b_singletool
+    mode: singletool
     model_provider: local
     model_type: Qwen/Qwen3-32B
     tools:
       - search_engine
     dataset: hotpotqa
-    output: local/evaluation/qwen3_32b/tool_EPA/hotpotqa.json
-    state_rule:
-      - execute
-      - plan
-      - submit
+    judge-only: true
+    output: local/evaluation/qwen3_32b/singletool/summary/hotpotqa.json
+
 
   # - name: Qwen3_235b_instruct
   #   mode: tool
