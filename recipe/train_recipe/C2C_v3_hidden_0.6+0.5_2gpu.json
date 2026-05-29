@@ -2,13 +2,13 @@
     "model": {
         "base_model": "Qwen/Qwen3-0.6B",
         "teacher_model": "Qwen/Qwen2.5-0.5B-Instruct",
-        "include_response": false,
+        "include_response": true,
         "is_do_alignment": false,
         "alignment_strategy": "first",
         "projector": {
-            "type": "C2CProjectorV3",
+            "type": "C2CHiddenStateProjector",
             "params": {
-                "source_hidden_dim": 896,
+                "hidden_dim": 896,
                 "intermediate_dim": 1024,
                 "num_layers": 3,
                 "dropout": 0.1,
@@ -35,14 +35,14 @@
         "seed": 42
     },
     "output": {
-        "output_dir": "local/checkpoints/0.6+0.5B_C2C_v3_hidden_OpenHermes_500k_2gpu",
+        "output_dir": "local/checkpoints/0.6+0.5B_C2C_v3_hidden_OpenHermes_500k_include_response_2gpu",
         "save_steps": 500,
         "eval_steps": 100,
         "wandb_config": {
             "project": "C2C",
             "mode": "online",
             "entity": "june6-hanyang-university",
-            "run_name": "0.6B+0.5B_C2C_v3_hidden_OpenHermes_500k_2gpu"
+            "run_name": "0.6B+0.5B_C2C_v3_hidden_OpenHermes_500k_include_response_2gpu"
         }
     },
     "data": {
