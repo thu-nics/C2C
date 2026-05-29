@@ -23,7 +23,7 @@
         "learning_rate": 1e-4,
         "weight_decay": 0.01,
         "num_epochs": 1,
-        "max_length": 2048,
+        "max_length": 1024,
         "device": "cuda",
         "scheduler_type": "linear",
         "warmup_ratio": 0.1,
@@ -35,22 +35,22 @@
         "seed": 42
     },
     "output": {
-        "output_dir": "local/checkpoints/0.6+0.5B_C2C_v3_hidden_OpenHermes_500k_include_response_2gpu",
-        "save_steps": 500,
-        "eval_steps": 100,
+        "output_dir": "local/checkpoints/0.6+0.5B_C2C_v3_hidden_MMLU_15k_include_response_2gpu",
+        "save_steps": 116,
+        "eval_steps": 116,
         "wandb_config": {
             "project": "C2C",
             "mode": "online",
             "entity": "june6-hanyang-university",
-            "run_name": "0.6B+0.5B_C2C_v3_hidden_OpenHermes_500k_include_response_2gpu"
+            "run_name": "0.6B+0.5B_C2C_v3_hidden_MMLU_15k_include_response_2gpu"
         }
     },
     "data": {
-        "type": "OpenHermesChatDataset",
+        "type": "MMLUChatDataset",
         "kwargs": {
-            "split": "train",
-            "max_word_count": 2048,
-            "num_samples": 500000
+            "split": "auxiliary_train",
+            "max_word_count": 1024,
+            "num_samples": 15000
         },
         "train_ratio": 0.99
     }
