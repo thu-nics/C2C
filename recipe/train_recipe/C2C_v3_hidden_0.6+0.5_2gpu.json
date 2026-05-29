@@ -50,7 +50,8 @@
         "kwargs": {
             "split": "auxiliary_train",
             "max_word_count": 1024,
-            "num_samples": 15000
+            "num_samples": 15000,
+            "cache_dir": "local/hf_datasets_cache/mmlu_v3_15k"
         },
         "train_ratio": 0.99
     }
