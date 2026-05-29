@@ -18,7 +18,8 @@ output:
 eval:
   dataset: mmlu-redux
   gpu_ids: [0, 1]
-  answer_method: generate
+  answer_method: logits
+  response_text: "The correct answer is"
   use_cot: false
   use_template: true
   sample_interval: 1
