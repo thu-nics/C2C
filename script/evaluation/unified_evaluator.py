@@ -1010,25 +1010,27 @@ class UnifiedEvaluator:
                 split_index = int(m.group(1))
                 total_splits = max(1, int(m.group(2)))
 
+        dataset_cache_dir = self.eval_config.get("dataset_cache_dir")
+        load_dataset_kwargs = {"cache_dir": dataset_cache_dir} if dataset_cache_dir else {}
         if self.dataset_name == "math-500":
-            dataset = load_dataset(self.dataset_config["dataset_name"])
+            dataset = load_dataset(self.dataset_config["dataset_name"], **load_dataset_kwargs)
         elif self.dataset_name == "gsm8k":
             base_subset = "main" if is_virtual_split else subject
-            dataset = load_dataset(self.dataset_config["dataset_name"], base_subset)
+            dataset = load_dataset(self.dataset_config["dataset_name"], base_subset, **load_dataset_kwargs)
         elif self.dataset_name == "openbookqa":
-            dataset = load_dataset(self.dataset_config["dataset_name"])
+            dataset = load_dataset(self.dataset_config["dataset_name"], **load_dataset_kwargs)
         elif self.dataset_name == "gpqa":
             base_subset = "gpqa_diamond" if is_virtual_split else subject
-            dataset = load_dataset(self.dataset_config["dataset_name"], base_subset)
+            dataset = load_dataset(self.dataset_config["dataset_name"], base_subset, **load_dataset_kwargs)
         elif self.dataset_name == "ai2-arc":
             base_subset = "ARC-Challenge" if is_virtual_split else subject
-            dataset = load_dataset(self.dataset_config["dataset_name"], base_subset)
+            dataset = load_dataset(self.dataset_config["dataset_name"], base_subset, **load_dataset_kwargs)
         elif self.dataset_name == "mmlu-pro":
-            dataset = load_dataset(self.dataset_config["dataset_name"])
+            dataset = load_dataset(self.dataset_config["dataset_name"], **load_dataset_kwargs)
         elif self.dataset_name == "ceval":
-            dataset = load_dataset(self.dataset_config["dataset_name"], subject)
+            dataset = load_dataset(self.dataset_config["dataset_name"], subject, **load_dataset_kwargs)
         else:
-            dataset = load_dataset(self.dataset_config["dataset_name"], subject)
+            dataset = load_dataset(self.dataset_config["dataset_name"], subject, **load_dataset_kwargs)
         # dataset = load_from_disk("local/teacher_datasets/MMMLU")
         test_data = dataset[self.dataset_config["test_split"]]
         

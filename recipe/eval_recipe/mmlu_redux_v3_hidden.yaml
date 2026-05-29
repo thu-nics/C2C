@@ -22,4 +22,5 @@ eval:
   use_cot: false
   use_template: true
   sample_interval: 1
+  dataset_cache_dir: local/hf_datasets_cache/mmlu_redux_v3_eval
   math_grading_method: "comprehensive"
