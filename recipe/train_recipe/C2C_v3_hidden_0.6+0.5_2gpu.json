@@ -2,7 +2,7 @@
     "model": {
         "base_model": "Qwen/Qwen3-0.6B",
         "teacher_model": "Qwen/Qwen2.5-0.5B-Instruct",
-        "include_response": true,
+        "include_response": false,
         "is_do_alignment": false,
         "alignment_strategy": "first",
         "projector": {
@@ -35,14 +35,14 @@
         "seed": 42
     },
     "output": {
-        "output_dir": "local/checkpoints/0.6+0.5B_C2C_v3_hidden_MMLU_15k_include_response_2gpu",
+        "output_dir": "local/checkpoints/0.6+0.5B_C2C_v3_hidden_MMLU_15k_2gpu",
         "save_steps": 116,
         "eval_steps": 116,
         "wandb_config": {
             "project": "C2C",
             "mode": "online",
             "entity": "june6-hanyang-university",
-            "run_name": "0.6B+0.5B_C2C_v3_hidden_MMLU_15k_include_response_2gpu"
+            "run_name": "0.6B+0.5B_C2C_v3_hidden_MMLU_15k_2gpu"
         }
     },
     "data": {
