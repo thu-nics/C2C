@@ -31,6 +31,8 @@ Feel free to star the repo or cite the paper if you find it interesting.
 
 ## News
 
+[2026/09] 🤔 We will soon be releasing agent-managed KV-Cache in this repo, along with the corresponding serving system, as our next step forward. Stay tuned!
+
 [2026/01] 🎉 Our paper is accepted by the ICLR'26 conference. Welcome to discuss more about it in Brazil.
 
 [2025/12] 🧪 Multi-sharer support is now available! Fuse KV-caches from multiple sharer models to a single receiver. This feature is in preliminary stages and we are still actively working on it. See `live_chat_example.py` for usage.
