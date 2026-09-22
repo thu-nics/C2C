@@ -749,18 +749,18 @@ class RosettaModel(nn.Module):
             if not isinstance(next_token, torch.Tensor):
                 next_token = torch.tensor([next_token], device=all_input_ids.device, dtype=torch.long).repeat(batch_size)
 
-            # Apply EOS logic
+            # Apply EOS logic: pad rows that finished on an earlier step, keep this step's EOS token
             if eos_set is not None:
-                just_finished = torch.zeros_like(finished)
-                for eid in eos_set:
-                    just_finished |= (next_token == eid)
-                finished = finished | just_finished
                 if pad_token_id is not None:
                     next_token = torch.where(
                         finished,
                         torch.tensor(pad_token_id, device=next_token.device, dtype=next_token.dtype),
                         next_token,
                     )
+                just_finished = torch.zeros_like(finished)
+                for eid in eos_set:
+                    just_finished |= (next_token == eid)
+                finished = finished | just_finished
 
             # Append sampled token
             next_token_unsqueezed = next_token.unsqueeze(1)
