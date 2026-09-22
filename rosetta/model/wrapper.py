@@ -402,11 +402,14 @@ class RosettaModel(nn.Module):
         
         curr_base_kv_cache = past_key_values
 
+        # attention_mask covers the cached tokens plus the new ones, so offset the section ends by the cached length
+        mask_offset = base_attention_mask.shape[1] - seqlen if base_attention_mask is not None else 0
+
         for i in range(num_sections):
             start = section_starts[i]
             end = section_starts[i + 1]
             prefill_input_ids = base_input_ids[:, start:end] if base_input_ids is not None else None
-            prefill_attention_mask = base_attention_mask[:, :end] if base_attention_mask is not None else None
+            prefill_attention_mask = base_attention_mask[:, :mask_offset + end] if base_attention_mask is not None else None
             prefill_position_ids = position_ids[:, start:end] if position_ids is not None else None
             prefill_labels = labels[:, start:end] if labels is not None else None
 
