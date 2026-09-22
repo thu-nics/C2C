@@ -57,8 +57,8 @@ def sample_token(logits: torch.Tensor, temperature: float = 1.0, top_p: float = 
         cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
         
         # Create a mask for probabilities to keep
-        # Values above top_p threshold are masked out
-        mask = cumulative_probs <= top_p
+        # Keep the smallest prefix whose mass reaches top_p (a token is kept if the mass before it is < top_p)
+        mask = (cumulative_probs - sorted_probs) < top_p
         
         # Always keep at least one token
         mask[:, 0] = True
