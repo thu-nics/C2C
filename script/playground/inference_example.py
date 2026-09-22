@@ -14,7 +14,6 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from rosetta.model.wrapper import RosettaModel
 from rosetta.model.aligner import TokenAligner, AlignmentStrategy
 from rosetta.model.projector import AllInOneProjector
-from rosetta.train.dataset_adapters import generate_kv_cache_index
 from typing import Dict, Any, List, Tuple, Optional
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
