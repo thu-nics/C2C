@@ -13,7 +13,7 @@
 
 </div>
 
-Cache-to-Cache (C2C) enables Large Language Models to communicate directly through their KV-Caches, bypassing text generation. By projecting and fusing KV-Caches between models, C2C achieves 8.5–10.5% higher accuracy than individual models and 3.0–5.0% better performance than text-based communication, with 2.0× speedup in latency.
+Cache-to-Cache (C2C) enables Large Language Models to communicate directly through their KV-Caches, bypassing text generation. By projecting and fusing KV-Caches between models, C2C achieves 6.4–14.2% higher accuracy than individual models and 3.1–5.4% better performance than text-based communication, with 2.5× speedup in latency.
 
 Feel free to star the repo or cite the paper if you find it interesting.
 
