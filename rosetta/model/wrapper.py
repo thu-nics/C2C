@@ -680,6 +680,8 @@ class RosettaModel(nn.Module):
         current_past = prefill_output.past_key_values
         all_input_ids = base_input_ids
         current_attention_mask = base_attention_mask
+        # Continue caller-supplied position_ids (e.g. for left padding) during decoding
+        next_position_ids = position_ids[:, -1:] + 1 if position_ids is not None else None
 
         # Initialize streamer with prompt if provided
         if streamer is not None:
@@ -786,13 +788,15 @@ class RosettaModel(nn.Module):
                 kv_cache_index=kv_cache_index,
                 input_ids=next_token_unsqueezed,
                 attention_mask=current_attention_mask,
-                position_ids=None,
+                position_ids=next_position_ids,
                 past_key_values=current_past,
                 use_cache=True,
                 *args,
                 **kwargs,
             )
             last_logits = decode_output.logits[:, -1, :]
+            if next_position_ids is not None:
+                next_position_ids = next_position_ids + 1
 
         # End streaming if streamer provided
         if streamer is not None:
