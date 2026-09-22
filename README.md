@@ -13,7 +13,7 @@
 
 </div>
 
-Cache-to-Cache (C2C) enables Large Language Models to communicate directly through their KV-Caches, bypassing text generation. By projecting and fusing KV-Caches between models, C2C achieves 8.5–10.5% higher accuracy than individual models and 3.0–5.0% better performance than text-based communication, with 2.0× speedup in latency.
+Cache-to-Cache (C2C) enables Large Language Models to communicate directly through their KV-Caches, bypassing text generation. By projecting and fusing KV-Caches between models, C2C achieves 6.4–14.2% higher accuracy than individual models and 3.1–5.4% better performance than text-based communication, with 2.5× speedup in latency.
 
 Feel free to star the repo or cite the paper if you find it interesting.
 
@@ -141,20 +141,29 @@ You can apply C2C to your own LLMs with a few lines of code. We provide a univer
 
 ```python
 import torch
-from transformers import AutoModelForCausalLM
+from transformers import AutoModelForCausalLM, AutoTokenizer
 from rosetta.model.wrapper import RosettaModel
 from rosetta.model.projector import C2CProjector
 
 # Load target (receiver) and source (sharer) models
 target_model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen3-0.6B")
 source_model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen2.5-0.5B-Instruct")
+tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
+
+# KV-Cache shape of each model: (head dim, number of KV heads)
+def kv_shape(config):
+    head_dim = getattr(config, "head_dim", None) or config.hidden_size // config.num_attention_heads
+    return head_dim, config.num_key_value_heads
+
+source_dim, source_num_heads = kv_shape(source_model.config)  # (64, 2) for Qwen2.5-0.5B
+target_dim, target_num_heads = kv_shape(target_model.config)  # (128, 8) for Qwen3-0.6B
 
 # Create C2C projector for KV-Cache transformation
 projector_list = []
 for i in range(target_model.config.num_hidden_layers):
     projector = C2CProjector(
-        source_dim=128, target_dim=128,
-        source_num_heads=8, target_num_heads=8,
+        source_dim=source_dim, target_dim=target_dim,
+        source_num_heads=source_num_heads, target_num_heads=target_num_heads,
         hidden_dim=1024, num_layers=3
     )
     projector_list.append(projector)
@@ -167,22 +176,32 @@ c2c_model = RosettaModel(
     projector_list=projector_list
 )
 
-# Configure layer-wise projection mappings
-for idx, layer_idx in enumerate(range(target_model.config.num_hidden_layers)):
+# Configure layer-wise projection mappings, aligning the last layers of the two models
+# (they can have different depths: 28 and 24 layers here)
+num_target_layers = target_model.config.num_hidden_layers
+num_source_layers = source_model.config.num_hidden_layers
+offset = num_source_layers - num_target_layers
+for layer_idx in range(num_target_layers):
+    source_layer_idx = min(max(layer_idx + offset, 0), num_source_layers - 1)
     c2c_model.set_projector_config(
-        source_model_idx=1, source_model_layer_idx=layer_idx,
+        source_model_idx=1, source_model_layer_idx=source_layer_idx,
         target_model_idx=0, target_model_layer_idx=layer_idx,
-        projector_idx=idx
+        projector_idx=layer_idx
     )
+
+prompt = [{"role": "user", "content": "Say hello in one short sentence."}]
+input_text = tokenizer.apply_chat_template(prompt, tokenize=False, add_generation_prompt=True, enable_thinking=False)
+inputs = tokenizer(input_text, return_tensors="pt")
 
 # Generate: kv_cache_index controls when to apply C2C projection
 # [1, 0] = apply projection from sharer 1, [-1, 0] = no projection
-seq_len = input_ids.shape[1]
+seq_len = inputs.input_ids.shape[1]
 instruction_index = torch.tensor([1, 0], dtype=torch.long).repeat(seq_len-1, 1)[None, :, :]
 response_index = torch.tensor([[-1, 0]], dtype=torch.long)[None, :, :]
 outputs = c2c_model.generate(
     kv_cache_index=[instruction_index, response_index],
     input_ids=inputs.input_ids,
+    max_new_tokens=64,
 )
 ```
 
@@ -265,23 +284,29 @@ Register in configuration: `{"projector": {"type": "MyProjector", "params": {...
 
 ### Adding Dataset
 
-Add a new dataset in `rosetta/train/dataset_adapters.py` for training with your data.
+Add a new dataset in `rosetta/train/dataset_adapters.py` for training with your data. Register the class with `@register_dataset`; each item is a list of chat messages.
 
 ```python
-@dataclass
-class MyDatasetConfig(DatasetConfig):
-    dataset_name: str = "my_dataset"
-    def load(self):
-        return load_dataset("path/to/dataset")
+@register_dataset
+@capture_init_args
+class MyChatDataset(Dataset):
+    def __init__(self, split: str = "train", num_samples: Optional[int] = None):
+        self.dataset = load_dataset("path/to/dataset", split=split)
+        if num_samples is not None:
+            self.dataset = self.dataset.select(range(min(num_samples, len(self.dataset))))
 
-def my_formatting_func(examples):
-    return {"text": [f"Q: {q}\nA: {a}" for q, a in zip(...)]}
+    def __len__(self):
+        return len(self.dataset)
 
-DATASET_CONFIGS["MyDataset"] = MyDatasetConfig
-FORMATTING_FUNCS["MyDataset"] = my_formatting_func
+    def __getitem__(self, idx):
+        sample = self.dataset[idx]
+        return [
+            {"role": "user", "content": sample["question"]},
+            {"role": "assistant", "content": sample["answer"]},
+        ]
 ```
 
-Use in configuration: `{"data": {"type": "MyDataset"}}`
+Use in configuration: `{"data": {"type": "MyChatDataset", "kwargs": {"split": "train"}, "train_ratio": 0.99}}`
 
 ### Adding Benchmark
 
