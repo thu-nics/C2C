@@ -5,7 +5,7 @@
   <h3>Direct Semantic Communication Between Large Language Models</h3>
 
   <p>
-    <a href="https://fuvty.github.io/C2C_Project_Page/">🌐 <b>Project Page</b></a> •
+    <a href="https://fuvty.github.io/thinking_yard_project_page/projects/c2c/">🌐 <b>Project Page</b></a> •
     <a href="https://arxiv.org/abs/2510.03215">📑 <b>Paper</b></a> •
     <a href="https://huggingface.co/nics-efc/C2C_Fuser">🤗 <b>HuggingFace</b></a> •
     <a href="https://huggingface.co/spaces/nics-efc/C2C_demo">🚀 <b>Live Demo</b></a>
