@@ -419,22 +419,25 @@ class RosettaModel(nn.Module):
                                                         source_kv_cache=self.kv_cache_dict[self.base_model_idx][1])
 
                 # calculate target model kvcache
-                output = self.model_list[self.base_model_idx].forward(
-                    input_ids=prefill_input_ids,
-                    attention_mask=prefill_attention_mask, 
-                    position_ids=prefill_position_ids,
-                    past_key_values=curr_base_kv_cache,
-                    labels=prefill_labels,
-                    use_cache=True, 
-                    output_attentions=output_attentions,
-                    output_hidden_states=output_hidden_states,
-                    *args,
-                    **kwargs
-                )
+                try:
+                    output = self.model_list[self.base_model_idx].forward(
+                        input_ids=prefill_input_ids,
+                        attention_mask=prefill_attention_mask,
+                        position_ids=prefill_position_ids,
+                        past_key_values=curr_base_kv_cache,
+                        labels=prefill_labels,
+                        use_cache=True,
+                        output_attentions=output_attentions,
+                        output_hidden_states=output_hidden_states,
+                        *args,
+                        **kwargs
+                    )
+                finally:
+                    # Always restore the original attention forwards, even if the forward raised
+                    if self.include_response:
+                        self.remove_hooks(hook_handlers)
 
                 if self.include_response:
-                    self.remove_hooks(hook_handlers)
-
                     self.kv_cache_dict[self.base_model_idx][self.base_model_idx] = clone_kv_cache(base_output_kv_cache)
                     self.kv_cache_dict[self.base_model_idx][1] = clone_kv_cache(source_output_kv_cache)
 
