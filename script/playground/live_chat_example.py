@@ -131,7 +131,8 @@ def generate(model, tokenizer, prompt: str, num_sharers: int, device):
             max_new_tokens=256,
         )
     
-    return tokenizer.decode(outputs[0], skip_special_tokens=True)
+    # generate() returns prompt + response; decode only the new tokens
+    return tokenizer.decode(outputs[0, inputs.input_ids.shape[1]:], skip_special_tokens=True)
 
 
 def main():
