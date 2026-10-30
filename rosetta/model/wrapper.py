@@ -402,11 +402,14 @@ class RosettaModel(nn.Module):
         
         curr_base_kv_cache = past_key_values
 
+        # attention_mask covers the cached tokens plus the new ones, so offset the section ends by the cached length
+        mask_offset = base_attention_mask.shape[1] - seqlen if base_attention_mask is not None else 0
+
         for i in range(num_sections):
             start = section_starts[i]
             end = section_starts[i + 1]
             prefill_input_ids = base_input_ids[:, start:end] if base_input_ids is not None else None
-            prefill_attention_mask = base_attention_mask[:, :end] if base_attention_mask is not None else None
+            prefill_attention_mask = base_attention_mask[:, :mask_offset + end] if base_attention_mask is not None else None
             prefill_position_ids = position_ids[:, start:end] if position_ids is not None else None
             prefill_labels = labels[:, start:end] if labels is not None else None
 
@@ -677,6 +680,8 @@ class RosettaModel(nn.Module):
         current_past = prefill_output.past_key_values
         all_input_ids = base_input_ids
         current_attention_mask = base_attention_mask
+        # Continue caller-supplied position_ids (e.g. for left padding) during decoding
+        next_position_ids = position_ids[:, -1:] + 1 if position_ids is not None else None
 
         # Initialize streamer with prompt if provided
         if streamer is not None:
@@ -744,18 +749,18 @@ class RosettaModel(nn.Module):
             if not isinstance(next_token, torch.Tensor):
                 next_token = torch.tensor([next_token], device=all_input_ids.device, dtype=torch.long).repeat(batch_size)
 
-            # Apply EOS logic
+            # Apply EOS logic: pad rows that finished on an earlier step, keep this step's EOS token
             if eos_set is not None:
-                just_finished = torch.zeros_like(finished)
-                for eid in eos_set:
-                    just_finished |= (next_token == eid)
-                finished = finished | just_finished
                 if pad_token_id is not None:
                     next_token = torch.where(
                         finished,
                         torch.tensor(pad_token_id, device=next_token.device, dtype=next_token.dtype),
                         next_token,
                     )
+                just_finished = torch.zeros_like(finished)
+                for eid in eos_set:
+                    just_finished |= (next_token == eid)
+                finished = finished | just_finished
 
             # Append sampled token
             next_token_unsqueezed = next_token.unsqueeze(1)
@@ -783,13 +788,15 @@ class RosettaModel(nn.Module):
                 kv_cache_index=kv_cache_index,
                 input_ids=next_token_unsqueezed,
                 attention_mask=current_attention_mask,
-                position_ids=None,
+                position_ids=next_position_ids,
                 past_key_values=current_past,
                 use_cache=True,
                 *args,
                 **kwargs,
             )
             last_logits = decode_output.logits[:, -1, :]
+            if next_position_ids is not None:
+                next_position_ids = next_position_ids + 1
 
         # End streaming if streamer provided
         if streamer is not None:
